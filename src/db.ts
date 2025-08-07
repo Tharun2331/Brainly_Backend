@@ -2,6 +2,7 @@ import mongoose from "mongoose"
 const Schema = mongoose.Schema;
 import dotenv from "dotenv";
 import { optional } from "zod";
+// import { PineConeIndex,indexContent } from ".";
 dotenv.config();
 if (!process.env.MONGODBURI) {
   throw new Error("MONGOURI environment variable is not defined");
@@ -10,7 +11,9 @@ if (!process.env.MONGODBURI) {
 mongoose.connect(process.env.MONGODBURI);
 
 // Add these connection handlers
-mongoose.connection.on('connected', () => {
+mongoose.connection.on('connected', async () => {
+  // await PineConeIndex();
+  // await indexContent();
   console.log('Connected to MongoDB');
 });
 
@@ -32,14 +35,16 @@ const userSchema = new Schema({
 const tagSchema = new Schema({
   tag: {type:String, required:true, unique:true},
 })
-const contentTypes = ['image','video', 'article', 'audio','youtube', 'twitter'];
+const contentTypes = ['image','video', 'article', 'audio','youtube', 'twitter','note'];
 
 const contentSchema = new Schema({
-  link: {type:String, required:true},
+  link: {type:String},
   type: {type:String, enum:contentTypes, required:true},
-  title:{type:String,required:true},
+  title:{type:String},
+  description: {type:String},
   tags: [{type: Schema.Types.ObjectId, ref:'Tags'}],
   userId: {type: Schema.Types.ObjectId, ref:'Users', required:true}
+
 
 })
 

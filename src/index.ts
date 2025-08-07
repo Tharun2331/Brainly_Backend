@@ -19,6 +19,8 @@ import { userMiddleware } from "./middleware";
 import crypto from "crypto";
 import { Random } from "./utils";
 import cors from "cors";
+import OpenAI from "openai";
+import { Pinecone } from "@pinecone-database/pinecone";
 const USER_JWT_SECRET = process.env.USER_JWT_SECRET
 const port= process.env.PORT || 3000;
 const app = express();
@@ -26,6 +28,114 @@ app.use(express.json())
 app.use(cors());
 dotenv.config();
 
+
+// const openAI = new OpenAI({
+//   apiKey: process.env.OPENAI_API
+// });
+
+// const pc = new Pinecone({
+//   apiKey: process.env.PINECONE_API as string
+// });
+
+// const indexName= "chatbot";
+// const PineConeIndex = async () => {
+//   const existingIndexes = await pc.listIndexes();
+
+//   // Check if index already exists
+//   const indexExists = existingIndexes?.indexes?.some(idx => idx.name === indexName);
+
+//   if (!indexExists) {
+//     console.log(`Creating index: ${indexName}`);
+//     await pc.createIndex({
+//       name: indexName,
+//       dimension: 1536, // for OpenAI's text-embedding-3-small
+//       metric: "cosine",
+//       spec: {
+//         serverless: {
+//           cloud: "aws",
+//           region: "us-east-1"
+//         }
+//       }
+//     });
+
+//     // Wait for index to become ready
+//     // Pinecone client may not have waitUntilReady; optionally poll for readiness or remove this line.
+//     console.log(`Index "${indexName}" is now ready.`);
+//   } else {
+//     console.log(`Index "${indexName}" already exists.`);
+//   }
+// };
+
+// // Load MongoDB content into vector DB
+// const indexContent = async () => {
+//   const index = pc.index(indexName).namespace("chatrag");
+//   const mongoData = await contentModel.find().populate("tags", "tag");
+
+//   const vectors = await Promise.all(
+//     mongoData.map(async (data) => {
+//       const chunkText = `${data.title || ""} ${data.description || ""} ${Array.isArray(data.tags) ? data.tags.map((t: any) => t.tag).join(", ") : ""}`.trim();
+
+//       // Embed using OpenAI (you could also pre-compute this)
+//       const embeddingResponse = await openAI.embeddings.create({
+//         model: "text-embedding-3-small",
+//         input: chunkText,
+//       });
+
+//       return {
+//         id: data._id.toString(),
+//         values: embeddingResponse.data[0].embedding,
+//         metadata: {
+//           link: data.link || "",
+//           type: data.type || "",
+//           originalTitle: data.title || "",
+//           originalDescription: data.description || "",
+//           originalTags: Array.isArray(data.tags)
+//         },
+//       };
+//     })
+//   );
+
+//   await index.upsert(vectors);
+// };
+
+// export {PineConeIndex,indexContent}
+
+
+// app.post("/api/v1/ai-query", userMiddleware, async (req:Request,res:Response)=> {
+//   try{
+//     const {query} = req.body;
+//     if(!query)
+//     {
+//       return res.status(400).json({
+//         message: "Query is required!"
+//       })
+//     }
+
+//     const index = pc.index(indexName).namespace("chatrag");
+
+//     const embeddingResponse = await openAI.embeddings.create({
+//       model: "text-embedding-3-small",
+//       input:query
+//     });
+
+//     const queryEmbedding = embeddingResponse.data[0].embedding;
+
+//     const result = await index.query({
+//       topK:5,
+//       vector: queryEmbedding,
+//       includeMetadata:true,
+//     });
+
+//     return res.status(200).json({
+//       message: "Success",
+//       results: result.matches,
+//     });
+//   }
+//   catch (error) {
+//     console.error("Query Error:", error);
+//     return res.status(500).json({ message: "Internal Server Error" });
+//   }
+// })
 
 app.post("/api/v1/signup", async (req: Request, res: Response) => {
   try {
@@ -107,10 +217,11 @@ app.post("/api/v1/signup", async (req: Request, res: Response) => {
   })
 
   app.post("/api/v1/content", userMiddleware, async (req,res)=> {
-      const {link,type,title,tags=[]} = req.body;
+      const {link,type,title,tags=[],description} = req.body;
       await contentModel.create({
         link,
         title,
+        description,
         type,
         userId: req.userId,
         tags
@@ -279,7 +390,7 @@ app.post("/api/v1/signup", async (req: Request, res: Response) => {
       const twitter = await contentModel.find({
         userId: userId,
         type: "twitter"
-      }). populate("tags", "tag").populate("userId", "username");
+      }). populate("tags", "tag")
       res.status(200).json({
         message: "Tweets fetched successfully",
         twitter: twitter,
@@ -301,7 +412,7 @@ app.post("/api/v1/signup", async (req: Request, res: Response) => {
       const youtubeVideos = await contentModel.find({
         userId: userId,
         type: "youtube"
-      }).populate("tags", "tag").populate("userId", "username");
+      }).populate("tags", "tag")
       return res.status(200).json({
         message: "Youtube videos fetched successfully",
         youtubeVideos: youtubeVideos,
@@ -314,9 +425,73 @@ app.post("/api/v1/signup", async (req: Request, res: Response) => {
       });
     }
   });
- 
 
-  
+app.get("/api/v1/content/articles", userMiddleware, async (req: Request, res: Response) => {
+  try {
+    const userId = req.userId;
+    const articles = await contentModel.find({
+      userId: userId,
+      type:"article",
+    }).populate("tags","tag")
+    return res.status(200).json({
+      message: "Articles are fetched successfully",
+      articles: articles
+    });
+  }
+  catch(err){
+    return res.status(500).json({
+      message: "Failed to fetch articles",
+      error: err instanceof Error ? err.message : "Unknown error",
+    })
+  }
+})
+
+app.get("/api/v1/content/notes", userMiddleware, async (req, res) => {
+  try {
+    const notes = await contentModel.find({ type: "note" }).populate("tags");
+    return res.status(200).json({ notes });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Failed to fetch notes",
+      error: err instanceof Error ? err.message : "Unknown error",
+    });
+  }
+})
+
+app.put("/api/v1/content/:id", userMiddleware, async (req, res) => {
+  const { title, link, description, type, tags } = req.body;
+  const contentId = req.params.id;
+  const userId = req.userId;
+
+  try {
+    const content = await contentModel.findOneAndUpdate(
+      { _id: contentId, userId: userId },
+      { title, link, description, type, tags },
+      { new: true, runValidators: true }
+    );
+
+    if (!content) {
+      return res.status(404).json({
+        message: "Content not found or you do not have permission to update it",
+      });
+    }
+
+    const updatedContent = await contentModel
+      .findById(content._id)
+      .populate("tags", "tag")
+      .populate("userId", "username");
+
+    return res.status(200).json({
+      message: "Content updated successfully",
+      content: updatedContent,
+    });
+  } catch (err) {
+    return res.status(500).json({
+      message: "Failed to update content",
+      error: err instanceof Error ? err.message : "Unknown error",
+    });
+  }
+});
 
   app.listen(port, ()=> {
     console.log(`Running on Port ${port}`)
