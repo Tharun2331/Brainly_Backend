@@ -7,7 +7,6 @@ declare global {
   }
 }
 
-
 import express, { Request, Response } from "express";
 import mongoose from "mongoose";
 import jwt from "jsonwebtoken";
@@ -20,122 +19,20 @@ import crypto from "crypto";
 import { Random } from "./utils";
 import cors from "cors";
 import OpenAI from "openai";
-import { Pinecone } from "@pinecone-database/pinecone";
+import job from "./cron";
+
+
 const USER_JWT_SECRET = process.env.USER_JWT_SECRET
 const port= process.env.PORT || 3000;
 const app = express();
 app.use(express.json())
 app.use(cors());
 dotenv.config();
-
-
-// const openAI = new OpenAI({
-//   apiKey: process.env.OPENAI_API
-// });
-
-// const pc = new Pinecone({
-//   apiKey: process.env.PINECONE_API as string
-// });
-
-// const indexName= "chatbot";
-// const PineConeIndex = async () => {
-//   const existingIndexes = await pc.listIndexes();
-
-//   // Check if index already exists
-//   const indexExists = existingIndexes?.indexes?.some(idx => idx.name === indexName);
-
-//   if (!indexExists) {
-//     console.log(`Creating index: ${indexName}`);
-//     await pc.createIndex({
-//       name: indexName,
-//       dimension: 1536, // for OpenAI's text-embedding-3-small
-//       metric: "cosine",
-//       spec: {
-//         serverless: {
-//           cloud: "aws",
-//           region: "us-east-1"
-//         }
-//       }
-//     });
-
-//     // Wait for index to become ready
-//     // Pinecone client may not have waitUntilReady; optionally poll for readiness or remove this line.
-//     console.log(`Index "${indexName}" is now ready.`);
-//   } else {
-//     console.log(`Index "${indexName}" already exists.`);
-//   }
-// };
-
-// // Load MongoDB content into vector DB
-// const indexContent = async () => {
-//   const index = pc.index(indexName).namespace("chatrag");
-//   const mongoData = await contentModel.find().populate("tags", "tag");
-
-//   const vectors = await Promise.all(
-//     mongoData.map(async (data) => {
-//       const chunkText = `${data.title || ""} ${data.description || ""} ${Array.isArray(data.tags) ? data.tags.map((t: any) => t.tag).join(", ") : ""}`.trim();
-
-//       // Embed using OpenAI (you could also pre-compute this)
-//       const embeddingResponse = await openAI.embeddings.create({
-//         model: "text-embedding-3-small",
-//         input: chunkText,
-//       });
-
-//       return {
-//         id: data._id.toString(),
-//         values: embeddingResponse.data[0].embedding,
-//         metadata: {
-//           link: data.link || "",
-//           type: data.type || "",
-//           originalTitle: data.title || "",
-//           originalDescription: data.description || "",
-//           originalTags: Array.isArray(data.tags)
-//         },
-//       };
-//     })
-//   );
-
-//   await index.upsert(vectors);
-// };
-
-// export {PineConeIndex,indexContent}
-
-
-// app.post("/api/v1/ai-query", userMiddleware, async (req:Request,res:Response)=> {
-//   try{
-//     const {query} = req.body;
-//     if(!query)
-//     {
-//       return res.status(400).json({
-//         message: "Query is required!"
-//       })
-//     }
-
-//     const index = pc.index(indexName).namespace("chatrag");
-
-//     const embeddingResponse = await openAI.embeddings.create({
-//       model: "text-embedding-3-small",
-//       input:query
-//     });
-
-//     const queryEmbedding = embeddingResponse.data[0].embedding;
-
-//     const result = await index.query({
-//       topK:5,
-//       vector: queryEmbedding,
-//       includeMetadata:true,
-//     });
-
-//     return res.status(200).json({
-//       message: "Success",
-//       results: result.matches,
-//     });
-//   }
-//   catch (error) {
-//     console.error("Query Error:", error);
-//     return res.status(500).json({ message: "Internal Server Error" });
-//   }
-// })
+const openAI = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+if(process.env.NODE_ENV==="production") job.start();
+app.get("api/v1/health",(req,res)=> {
+  res.status(200).json({message:"Server is running"})
+})
 
 app.post("/api/v1/signup", async (req: Request, res: Response) => {
   try {
@@ -148,6 +45,7 @@ app.post("/api/v1/signup", async (req: Request, res: Response) => {
         }
       ),
     });
+
 
     const result = schema.safeParse(req.body);
 
@@ -216,20 +114,43 @@ app.post("/api/v1/signup", async (req: Request, res: Response) => {
     }
   })
 
-  app.post("/api/v1/content", userMiddleware, async (req,res)=> {
-      const {link,type,title,tags=[],description} = req.body;
-      await contentModel.create({
+  app.post("/api/v1/content", userMiddleware, async (req, res) => {
+    try {
+      const { link, type, title, tags = [], description } = req.body;
+      
+      // Validation
+      if (!type || !['note', 'article', 'twitter'].includes(type)) {
+        return res.status(400).json({ error: "Invalid or missing content type" });
+      }
+      
+      if (type !== 'note' && !link) {
+        return res.status(400).json({ error: "Link required for article/twitter content" });
+      }
+  
+      const doc = await contentModel.create({
         link,
         title,
         description,
         type,
         userId: req.userId,
-        tags
-      })
-      return res.status(200).json({
-        message:"content added"
-      })
-  })  
+        tags,
+        processingStatus: "pending"
+      });
+  
+  
+      return res.status(201).json({
+        message: "Content added successfully",
+        contentId: doc._id.toString()
+      });
+      
+    } catch (error: any) {
+      console.error('Failed to create content:', error);
+      return res.status(500).json({ 
+        error: "Failed to create content",
+        details: error.message 
+      });
+    }
+  });
 
   app.get("/api/v1/content", userMiddleware, async (req,res)=> {
      const userId = req.userId;
@@ -448,7 +369,7 @@ app.get("/api/v1/content/articles", userMiddleware, async (req: Request, res: Re
 
 app.get("/api/v1/content/notes", userMiddleware, async (req, res) => {
   try {
-    const notes = await contentModel.find({ type: "note" }).populate("tags");
+    const notes = await contentModel.find({ userId: req.userId, type: "note" }).populate("tags", "tag");
     return res.status(200).json({ notes });
   } catch (err) {
     return res.status(500).json({
@@ -492,6 +413,7 @@ app.put("/api/v1/content/:id", userMiddleware, async (req, res) => {
     });
   }
 });
+
 
   app.listen(port, ()=> {
     console.log(`Running on Port ${port}`)

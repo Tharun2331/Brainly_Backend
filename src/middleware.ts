@@ -6,17 +6,23 @@ dotenv.config();
 const JWT_SECRET = process.env.USER_JWT_SECRET;
 
 export const userMiddleware = (req:Request, res: Response, next: NextFunction) => {
-  const header = req.headers["authorization"];
-  const decoded = jwt.verify(header as string,JWT_SECRET as string)
-  if (decoded)
-  { 
-    req.userId = (decoded as JwtPayload).id;
-    next();
-  }
-  else {
-    res.status(403).json({
-      message:"You are not logged in!"
-    })
-  }
+  try {
+    const header = req.headers["authorization"];
+    if (!header) {
+      return res.status(401).json({ message: "Missing Authorization header" });
+    }
 
+    const [scheme, token] = header.split(" ");
+    const jwtToken = scheme?.toLowerCase() === "bearer" ? token : header;
+
+    if (!jwtToken) {
+      return res.status(401).json({ message: "Invalid Authorization header format" });
+    }
+
+    const decoded = jwt.verify(jwtToken, JWT_SECRET as string);
+    req.userId = (decoded as JwtPayload).id;
+    return next();
+  } catch {
+    return res.status(401).json({ message: "Invalid or expired token" });
+  }
 }
