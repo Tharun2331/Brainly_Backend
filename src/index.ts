@@ -30,7 +30,8 @@ app.use(cors());
 dotenv.config();
 const openAI = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 if(process.env.NODE_ENV==="production") job.start();
-app.get("api/v1/health",(req,res)=> {
+
+app.get("/api/v1/health",(req,res)=> {
   res.status(200).json({message:"Server is running"})
 })
 
