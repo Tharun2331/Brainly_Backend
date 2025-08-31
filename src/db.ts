@@ -32,14 +32,15 @@ const userSchema = new Schema({
 const tagSchema = new Schema({
   tag: {type:String, required:true, unique:true},
 })
-const contentTypes = ['image','video', 'article', 'audio','youtube', 'twitter'];
+const contentTypes = ['image','video', 'article', 'audio','youtube', 'twitter','note'];
 
 const contentSchema = new Schema({
-  link: {type:String, required:true},
+  link: {type:String, required:false},
   type: {type:String, enum:contentTypes, required:true},
   title:{type:String,required:true},
   tags: [{type: Schema.Types.ObjectId, ref:'Tags'}],
-  userId: {type: Schema.Types.ObjectId, ref:'Users', required:true}
+  userId: {type: Schema.Types.ObjectId, ref:'Users', required:true},
+  description: {type:String, required:true}
 
 })
 
