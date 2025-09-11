@@ -19,7 +19,7 @@ import { Random } from "../utils";
 export async function signupUser(req: Request, res: Response){
     try {
       const schema = z.object({
-        username: z.string().min(3).max(10),
+        username: z.string().min(3).max(20),
         password: z.string().min(8).max(20).regex(
           /^(?=.*[a-z])(?=.*[A-Z])(?=.*[!@#$%^&*])/,
           {
