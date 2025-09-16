@@ -8,7 +8,7 @@ import dotenv from "dotenv";
 import bcrypt from "bcrypt";
 import { userMiddleware } from "../middleware";
 import crypto from "crypto";
-import { Random } from "../utils";
+import { Random } from "../utils/hashUtils";
 import cors from "cors";
 import OpenAI from "openai";
 import { Router } from "express";

@@ -1,374 +1,243 @@
-declare global {
-  namespace Express {
-    export interface Request {
-      userId?: string;
-    }
-  }
-}
-
-import express, { Request, Response } from "express";
-import mongoose from "mongoose";
-import jwt from "jsonwebtoken";
-import { userMiddleware } from "../middleware";
-import { contentModel, linkModel, tagModel, userModel } from "../db";
-import {z} from "zod";
-const USER_JWT_SECRET = process.env.USER_JWT_SECRET;
+// src/controllers/BrainlyController.ts (Updated methods)
+import { Request, Response, NextFunction } from "express";
+import { z } from "zod";
 import bcrypt from "bcrypt";
-import { Random } from "../utils";
+import jwt from "jsonwebtoken";
+import { userModel, contentModel, linkModel, tagModel } from "../db";
+import { 
+  sendErrorResponse, 
+  sendSuccessResponse, 
+  formatZodError 
+} from "../utils/errorHandler";
+import { Random } from "../utils/hashUtils";
 
-export async function signupUser(req: Request, res: Response){
-    try {
-      const schema = z.object({
-        username: z.string().min(3).max(20),
-        password: z.string().min(8).max(20).regex(
-          /^(?=.*[a-z])(?=.*[A-Z])(?=.*[!@#$%^&*])/,
-          {
-            message: "Password must contain lowercase, uppercase, and special character",
-          }
-        ),
-      });
-  
-  
-      const result = schema.safeParse(req.body);
-  
-      if (!result.success) {
-        return res.status(411).json({
-          message: "Invalid request body",
-          errors: result.error.errors,
-        });
-      }
-  
-      const { username, password } = result.data;
-  
-      const existingUser = await userModel.findOne({ username });
-      if (existingUser) {
-        return res.status(403).json({ message: "Username already exists" });
-      }
-  
-      const hashedPassword = await bcrypt.hash(password, 5);
-  
-      await userModel.create({ username, password: hashedPassword });
-  
-      return res.status(200).json({ message: "User Signed up!" });
-    } catch (err) {
-      return res.status(500).json({
-        message: "Internal Server Error",
-        error: err instanceof Error ? err.message : "Unknown error",
-      });
-    }
-  };
+const USER_JWT_SECRET = process.env.USER_JWT_SECRET;
 
+// Validation schemas
+const signupSchema = z.object({
+  username: z
+    .string()
+    .min(3, "Username must be at least 3 characters")
+    .max(20, "Username cannot exceed 20 characters")
+    .regex(/^[a-zA-Z0-9_]+$/, "Username can only contain letters, numbers, and underscores"),
+  password: z
+    .string()
+    .min(8, "Password must be at least 8 characters")
+    .max(20, "Password cannot exceed 20 characters")
+    .regex(
+      /^(?=.*[a-z])(?=.*[A-Z])(?=.*[!@#$%^&*])/,
+      "Password must contain at least one lowercase letter, one uppercase letter, and one special character"
+    ),
+});
 
- export async function signinUser(req: Request, res: Response) {
-    const { username, password } = req.body;
-    try {
-      const user = await userModel.findOne({
-        username
-      });
+const signinSchema = z.object({
+  username: z.string().min(1, "Username is required"),
+  password: z.string().min(1, "Password is required"),
+});
 
-      if (!user) {
-        return res.status(404).json({
-          message: "User not found",
-        })
-      }
-      const isPasswordValid = await bcrypt.compare(password, user.password);
-      if (!isPasswordValid) {
-        return res.status(403).json({
-          message:"Invalid password",
-        })
-      }
-      else {
-        const token = jwt.sign({
-          id: user._id,
-        },USER_JWT_SECRET as string)
-        return res.status(200).json({
-          message:"User signed in Successfully",
-          token
-        })
-      }
-    }
-    catch (err) {
-      return res.status(500).json({
-        message: "Internal Server Error",
-        error: err instanceof Error ? err.message : "Unknown error",
-      });
-    }
-  }
+const contentSchema = z.object({
+  link: z.string().url("Invalid URL format").optional(),
+  type: z.enum(["note", "article", "twitter", "youtube"], {
+    errorMap: () => ({ message: "Invalid content type" }),
+  }),
+  title: z.string().min(1, "Title is required").max(200, "Title is too long"),
+  description: z.string().min(1, "Description is required").max(5000, "Description is too long"),
+  tags: z.array(z.string()).min(1, "At least one tag is required").optional(),
+});
 
-
-
- export async function createContent  (req: Request, res: Response) {
-    try {
-      const { link, type, title, tags = [], description } = req.body;
-      
-      // Validation
-      if (!type || !['note', 'article', 'twitter','youtube'].includes(type)) {
-        return res.status(400).json({ error: "Invalid or missing content type" });
-      }
-      
-      if (type !== 'note' && !link) {
-        return res.status(400).json({ error: "Link required for article/twitter content" });
-      }
-  
-      const doc = await contentModel.create({
-        link,
-        title,
-        description,
-        type,
-        userId: req.userId,
-        tags,
-        processingStatus: "pending"
-      });
-  
-  
-      return res.status(201).json({
-        message: "Content added successfully",
-        contentId: doc._id.toString()
-      });
-      
-    } catch (error: any) {
-      console.error('Failed to create content:', error);
-      return res.status(500).json({ 
-        error: "Failed to create content",
-        details: error.message 
-      });
-    }
-  }
-
-
-  export async function getContent(req:Request, res: Response) {
-      const userId = req.userId;
-      const content = await contentModel.find({
-       userId: userId
-      }).populate("userId", "username").populate("tags", "tag");
- 
-      return res.status(200).json({
-       content
-      })
-   }
-
-export async function deleteContent(req:Request, res: Response){
-  const contentId = req.params.id;
-  const userId = req.userId;
-  const results = await contentModel.deleteOne({
-    _id:contentId,
-    userId: userId
-  })
-  if(results.deletedCount === 0) {
-    return res.status(404).json({
-      message:"Content not found or you do not have permission to delete it"
-    })
-  }
-  return res.status(200).json({
-    message:"content deleted"
-  })
-};
-
-export async function createHash(req:Request,res:Response) {
-  try{
-    
-    const share= req.body.share;
-    const userId = req.userId;
-    const hash = Random(10);
-    if(share === true || share === undefined) {
-      const existingLink = await linkModel.findOne({
-       userId: req.userId
-      })
-      if(existingLink) {
-        return res.json({ 
-          hash:existingLink.hash
-        }) 
-      }
-      await linkModel.create({
-      userId:userId,
-      hash:hash
-    });
-    res.status(200).json({
-      message: `/share/${hash}`
-    })
-    }
-    else {
-      await linkModel.deleteOne({
-        userId:userId
-      })
-      res.status(403).json({
-        message:"Removed Link!"
-      })
-    }
-
-    }
-
-    catch(err) {
-       return res.status(500).json({
-      message: "Could not generate share link",
-      error: err instanceof Error ? err.message : "Unknown error",
-    });
-    }
-  }
-
-export async function getLink(req: Request, res: Response)
-{
+export async function signupUser(req: Request, res: Response, next: NextFunction) {
   try {
-    const {shareLink} = req.params;
-    const link = await linkModel.findOne({
-      hash: shareLink
-    })
-    if(!link)
-    {
-      return res.status(404).json({
-        message:"Share link not found!"
-      })
-    }
-    // userId
-    const content = await contentModel.find({
-      userId: link.userId
-    }).populate("tags","tag")
+    // Validate request body
+    const result = signupSchema.safeParse(req.body);
     
-    const user = await userModel.findOne({
-      _id: link.userId
-    })
-
-    console.log(link)
-    if(!user) {
-      return res.status(411).json({
-        message: "User not found!"
-      })
+    if (!result.success) {
+      return sendErrorResponse(
+        res,
+        400,
+        "Please correct the following errors",
+        formatZodError(result.error),
+        "VALIDATION_ERROR"
+      );
     }
 
-    return res.status(200).json({
-      message: "Content fetched Successfully!",
-      username: user.username,
-      content: content,
-    })
+    const { username, password } = result.data;
 
-  }
-  catch(err){
-    return res.status(500).json({
-    message: "Failed to fetch shared content",
-    error: err instanceof Error ? err.message : "Unknown error",
-  });
+    // Check if user exists
+    const existingUser = await userModel.findOne({ username });
+    if (existingUser) {
+      return sendErrorResponse(
+        res,
+        409,
+        "Username already taken",
+        { username: "This username is already registered" },
+        "DUPLICATE_USER"
+      );
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create user
+    const newUser = await userModel.create({ 
+      username, 
+      password: hashedPassword 
+    });
+
+    return sendSuccessResponse(
+      res,
+      201,
+      "Account created successfully! Please sign in.",
+      { userId: newUser._id, username: newUser.username }
+    );
+  } catch (error) {
+    next(error);
   }
 }
 
-export async function createTags(req: Request, res:Response){
-  const {tags} = req.body;
-    if(!Array.isArray(tags) || tags.length === 0) {
-      return res.status(400).json({
-        message: "Tags must be a non-empty array"
-      })
-    }
-    try{
-      const tagIds = [];
-      for(const tagText of tags)
-      {
-        let tagDoc = await tagModel.findOne({
-          tag: tagText
-        })
-
-        if(!tagDoc)
-        {
-          tagDoc = await tagModel.create({
-            tag: tagText
-          });
-        }
-        tagIds.push(tagDoc._id);
-      }
-      return res.status(200).json({
-        message: "Tags added successfully",
-        tagIds
-      })
-    }
-    catch(err) {
-      return res.status(500).json({
-        message: "Failed to add tags",
-        error: err instanceof Error ? err.message : "Unknown error",
-      });
-    }
-
-  }
-
-  export async function getTweets(req:Request, res:Response){
-    try {
-      const userId = req.userId;
-      const twitter = await contentModel.find({
-        userId: userId,
-        type: "twitter"
-      }). populate("tags", "tag")
-      res.status(200).json({
-        message: "Tweets fetched successfully",
-        twitter: twitter,
-      });
-    }
-
-    catch (err) {
-      return res.status(500).json({
-        message: "Failed to fetch tweets",
-        error: err instanceof Error ? err.message : "Unknown error",
-      });
-    }
-  }
-
-  export async function getVideos(req:Request, res: Response){
-    try {
-      const userId = req.userId;
-
-      const youtubeVideos = await contentModel.find({
-        userId: userId,
-        type: "youtube"
-      }).populate("tags", "tag")
-      return res.status(200).json({
-        message: "Youtube videos fetched successfully",
-        youtubeVideos: youtubeVideos,
-      });
-    }
-    catch (err) {
-      return res.status(500).json({
-        message: "Failed to fetch youtube videos",
-        error: err instanceof Error ? err.message : "Unknown error",
-      });
-    }
-  }
-
-  export async function getArticles(req:Request, res:Response) {
-    try {
-      const userId = req.userId;
-      const articles = await contentModel.find({
-        userId: userId,
-        type:"article",
-      }).populate("tags","tag")
-      return res.status(200).json({
-        message: "Articles are fetched successfully",
-        articles: articles
-      });
-    }
-    catch(err){
-      return res.status(500).json({
-        message: "Failed to fetch articles",
-        error: err instanceof Error ? err.message : "Unknown error",
-      })
-    }
-  }
-  
-
-  export async function getNotes(req:Request, res: Response) {
-    try {
-      const notes = await contentModel.find({ userId: req.userId, type: "note" }).populate("tags", "tag");
-      return res.status(200).json({ notes });
-    } catch (err) {
-      return res.status(500).json({
-        message: "Failed to fetch notes",
-        error: err instanceof Error ? err.message : "Unknown error",
-      });
-    }
-  }
-  
-
-  export async function updateContent(req:Request, res:Response) {
-  const { title, link, description, type, tags } = req.body;
-  const contentId = req.params.id;
-  const userId = req.userId;
-
+export async function signinUser(req: Request, res: Response, next: NextFunction) {
   try {
+    // Validate request body
+    const result = signinSchema.safeParse(req.body);
+    
+    if (!result.success) {
+      return sendErrorResponse(
+        res,
+        400,
+        "Please provide valid credentials",
+        formatZodError(result.error),
+        "VALIDATION_ERROR"
+      );
+    }
+
+    const { username, password } = result.data;
+
+    // Find user
+    const user = await userModel.findOne({ username });
+    if (!user) {
+      return sendErrorResponse(
+        res,
+        401,
+        "Invalid credentials",
+        { username: "Username or password is incorrect" },
+        "AUTH_FAILED"
+      );
+    }
+
+    // Verify password
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      return sendErrorResponse(
+        res,
+        401,
+        "Invalid credentials",
+        { password: "Username or password is incorrect" },
+        "AUTH_FAILED"
+      );
+    }
+
+    // Generate token
+    const token = jwt.sign(
+      { id: user._id },
+      USER_JWT_SECRET as string,
+      { expiresIn: "7d" }
+    );
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Signed in successfully!",
+      { token, username: user.username }
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createContent(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { link, type, title, tags = [], description } = req.body;
+    
+    // Validate based on content type
+    if (type !== 'note' && !link) {
+      return sendErrorResponse(
+        res,
+        400,
+        "Link is required for this content type",
+        { link: "Please provide a valid link" },
+        "VALIDATION_ERROR"
+      );
+    }
+
+    // Additional validation for specific types
+    if (type === 'youtube' && link) {
+      const youtubeRegex = /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/;
+      if (!youtubeRegex.test(link)) {
+        return sendErrorResponse(
+          res,
+          400,
+          "Invalid YouTube URL",
+          { link: "Please provide a valid YouTube link" },
+          "INVALID_URL"
+        );
+      }
+    }
+
+    if (type === 'twitter' && link) {
+      const twitterRegex = /^(https?:\/\/)?(www\.)?(twitter\.com|x\.com)\/.+$/;
+      if (!twitterRegex.test(link)) {
+        return sendErrorResponse(
+          res,
+          400,
+          "Invalid Twitter/X URL",
+          { link: "Please provide a valid Twitter/X link" },
+          "INVALID_URL"
+        );
+      }
+    }
+
+    // Create content
+    const content = await contentModel.create({
+      link,
+      title,
+      description,
+      type,
+      userId: req.userId,
+      tags,
+    });
+
+    const populatedContent = await contentModel
+      .findById(content._id)
+      .populate("tags", "tag");
+
+    return sendSuccessResponse(
+      res,
+      201,
+      "Content created successfully!",
+      populatedContent
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function updateContent(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { title, link, description, type, tags } = req.body;
+    const contentId = req.params.id;
+    const userId = req.userId;
+
+    // Validate content ID
+    if (!contentId.match(/^[0-9a-fA-F]{24}$/)) {
+      return sendErrorResponse(
+        res,
+        400,
+        "Invalid content ID",
+        undefined,
+        "INVALID_ID"
+      );
+    }
+
+    // Find and update content
     const content = await contentModel.findOneAndUpdate(
       { _id: contentId, userId: userId },
       { title, link, description, type, tags },
@@ -376,24 +245,303 @@ export async function createTags(req: Request, res:Response){
     );
 
     if (!content) {
-      return res.status(404).json({
-        message: "Content not found or you do not have permission to update it",
-      });
+      return sendErrorResponse(
+        res,
+        404,
+        "Content not found",
+        undefined,
+        "NOT_FOUND"
+      );
     }
 
     const updatedContent = await contentModel
       .findById(content._id)
-      .populate("tags", "tag")
-      .populate("userId", "username");
+      .populate("tags", "tag");
 
-    return res.status(200).json({
-      message: "Content updated successfully",
-      content: updatedContent,
+    return sendSuccessResponse(
+      res,
+      200,
+      "Content updated successfully!",
+      updatedContent
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function deleteContent(req: Request, res: Response, next: NextFunction) {
+  try {
+    const contentId = req.params.id;
+    const userId = req.userId;
+
+    // Validate content ID
+    if (!contentId.match(/^[0-9a-fA-F]{24}$/)) {
+      return sendErrorResponse(
+        res,
+        400,
+        "Invalid content ID",
+        undefined,
+        "INVALID_ID"
+      );
+    }
+
+    const result = await contentModel.deleteOne({
+      _id: contentId,
+      userId: userId,
     });
-  } catch (err) {
-    return res.status(500).json({
-      message: "Failed to update content",
-      error: err instanceof Error ? err.message : "Unknown error",
-    });
+
+    if (result.deletedCount === 0) {
+      return sendErrorResponse(
+        res,
+        404,
+        "Content not found or already deleted",
+        undefined,
+        "NOT_FOUND"
+      );
+    }
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Content deleted successfully!"
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getContent(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.userId;
+    
+    const content = await contentModel
+      .find({ userId })
+      .populate("userId", "username")
+      .populate("tags", "tag")
+      .sort({ createdAt: -1 });
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Content fetched successfully!",
+      { content }
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getNotes(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.userId;
+    
+    const notes = await contentModel
+      .find({ userId, type: "note" })
+      .populate("tags", "tag")
+      .sort({ createdAt: -1 });
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Notes fetched successfully!",
+      { notes }
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getArticles(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.userId;
+    
+    const articles = await contentModel
+      .find({ userId, type: "article" })
+      .populate("tags", "tag")
+      .sort({ createdAt: -1 });
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Articles fetched successfully!",
+      { articles }
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getTweets(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.userId;
+    
+    const tweets = await contentModel
+      .find({ userId, type: "twitter" })
+      .populate("tags", "tag")
+      .sort({ createdAt: -1 });
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Tweets fetched successfully!",
+      { tweets }
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getVideos(req: Request, res: Response, next: NextFunction) {
+  try {
+    const userId = req.userId;
+    
+    const videos = await contentModel
+      .find({ userId, type: "youtube" })
+      .populate("tags", "tag")
+      .sort({ createdAt: -1 });
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Videos fetched successfully!",
+      { youtubeVideos: videos }
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createHash(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { share } = req.body;
+    const userId = req.userId;
+
+    if (share === true || share === undefined) {
+      // Check if user already has a share link
+      const existingLink = await linkModel.findOne({ userId });
+      
+      if (existingLink) {
+        return sendSuccessResponse(
+          res,
+          200,
+          "Share link retrieved successfully!",
+          { hash: existingLink.hash, shareUrl: `/share/${existingLink.hash}` }
+        );
+      }
+
+      // Create new share link
+      const hash = Random(10);
+      await linkModel.create({
+        userId,
+        hash
+      });
+
+      return sendSuccessResponse(
+        res,
+        200,
+        "Share link created successfully!",
+        { hash, shareUrl: `/share/${hash}` }
+      );
+    } else {
+      // Remove share link
+      await linkModel.deleteOne({ userId });
+      
+      return sendSuccessResponse(
+        res,
+        200,
+        "Share link removed successfully!"
+      );
+    }
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function getLink(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { shareLink } = req.params;
+
+    // Find the share link
+    const link = await linkModel.findOne({ hash: shareLink });
+    
+    if (!link) {
+      return sendErrorResponse(
+        res,
+        404,
+        "Share link not found",
+        undefined,
+        "NOT_FOUND"
+      );
+    }
+
+    // Get user info
+    const user = await userModel.findById(link.userId);
+    if (!user) {
+      return sendErrorResponse(
+        res,
+        404,
+        "User not found",
+        undefined,
+        "USER_NOT_FOUND"
+      );
+    }
+
+    // Get user's content
+    const content = await contentModel
+      .find({ userId: link.userId })
+      .populate("tags", "tag")
+      .sort({ createdAt: -1 });
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Shared content fetched successfully!",
+      {
+        username: user.username,
+        content
+      }
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function createTags(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { tags } = req.body;
+
+    // Validate tags
+    if (!Array.isArray(tags) || tags.length === 0) {
+      return sendErrorResponse(
+        res,
+        400,
+        "Tags must be a non-empty array",
+        { tags: "Please provide at least one tag" },
+        "VALIDATION_ERROR"
+      );
+    }
+
+    const tagIds = [];
+    
+    for (const tagText of tags) {
+      // Check if tag already exists
+      let tagDoc = await tagModel.findOne({ tag: tagText });
+      
+      if (!tagDoc) {
+        // Create new tag
+        tagDoc = await tagModel.create({ tag: tagText });
+      }
+      
+      tagIds.push(tagDoc._id);
+    }
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Tags processed successfully!",
+      { tagIds }
+    );
+  } catch (error) {
+    next(error);
   }
 }
