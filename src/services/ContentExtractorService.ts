@@ -35,27 +35,72 @@ export class ContentExtractorService {
     } catch (error) {
       console.error(`Content extraction failed for ${type}:`, error);
       
-      // For YouTube, try to get metadata from Apify as fallback
-      if (type === 'youtube' && process.env.APIFY_API_TOKEN) {
-        try {
-          console.log('🔄 Trying Apify metadata fallback...');
-          const apifyMetadata = await ApifyService.getYouTubeMetadata(link);
-          const metadataContent = `${apifyMetadata.title || 'YouTube Video'}\n\n${apifyMetadata.text || ''}`.trim();
-          
+      // For YouTube, try multiple fallback strategies
+      if (type === 'youtube') {
+        const videoId = this.extractYouTubeVideoId(link);
+        
+        // Strategy 1: Try Apify metadata fallback
+        if (process.env.APIFY_API_TOKEN) {
+          try {
+            console.log('🔄 Trying Apify metadata fallback...');
+            const apifyMetadata = await ApifyService.getYouTubeMetadata(link);
+            const metadataContent = `${apifyMetadata.title || 'YouTube Video'}\n\n${apifyMetadata.text || ''}`.trim();
+            
+            return {
+              fullContent: metadataContent || description || 'No content available',
+              metadata: {
+                title: apifyMetadata.title || 'YouTube Video',
+                author: apifyMetadata.channelName || 'Unknown',
+                wordCount: metadataContent.split(/\s+/).length,
+                extractionMethod: 'fallback-metadata',
+                videoId,
+                duration: apifyMetadata.duration || 0,
+                error: error instanceof Error ? error.message : 'Unknown error'
+              }
+            };
+          } catch (metaError) {
+            console.warn('Apify metadata fallback failed:', metaError);
+          }
+        }
+        
+        // Strategy 2: Try YouTube API metadata fallback
+        if (process.env.YOUTUBE_API_KEY && videoId) {
+          try {
+            console.log('🔄 Trying YouTube API metadata fallback...');
+            const apiMetadata = await this.getYouTubeMetadataFromAPI(videoId);
+            if (apiMetadata.title) {
+              const apiContent = `${apiMetadata.title}\n\n${apiMetadata.description || 'No transcript available for this video.'}`;
+              return {
+                fullContent: apiContent,
+                metadata: {
+                  ...apiMetadata,
+                  wordCount: apiContent.split(/\s+/).length,
+                  extractionMethod: 'api-metadata-fallback',
+                  videoId,
+                  error: error instanceof Error ? error.message : 'Unknown error'
+                }
+              };
+            }
+          } catch (apiError) {
+            console.warn('YouTube API metadata fallback failed:', apiError);
+          }
+        }
+        
+        // Strategy 3: Basic video info fallback
+        if (videoId) {
+          console.log('🔄 Using basic video info fallback...');
+          const basicContent = `YouTube Video\nVideo ID: ${videoId}\nURL: ${link}\n\nNo transcript or captions available for this video. The creator may not have enabled captions or subtitles.`;
           return {
-            fullContent: metadataContent || description || 'No content available',
+            fullContent: basicContent,
             metadata: {
-              title: apifyMetadata.title || 'YouTube Video',
-              author: apifyMetadata.channelName || 'Unknown',
-              wordCount: metadataContent.split(/\s+/).length,
-              extractionMethod: 'fallback-metadata',
-              videoId: this.extractYouTubeVideoId(link),
-              duration: apifyMetadata.duration || 0,
+              title: 'YouTube Video',
+              author: 'Unknown',
+              wordCount: basicContent.split(/\s+/).length,
+              extractionMethod: 'basic-fallback',
+              videoId,
               error: error instanceof Error ? error.message : 'Unknown error'
             }
           };
-        } catch (metaError) {
-          console.warn('Apify metadata fallback failed:', metaError);
         }
       }
       
@@ -227,10 +272,49 @@ export class ContentExtractorService {
       };
     }
 
-    // All strategies failed and no metadata
-    throw new Error(
-      'No transcript available for this video. The creator may not have enabled captions or subtitles.'
-    );
+    // All strategies failed - try to get basic metadata as final fallback
+    console.warn('⚠️ All YouTube extraction strategies failed, attempting basic metadata fallback');
+    
+    try {
+      // Try to get basic video info from YouTube API if available
+      if (process.env.YOUTUBE_API_KEY) {
+        const basicMetadata = await this.getYouTubeMetadataFromAPI(videoId);
+        if (basicMetadata.title) {
+          console.log(`✅ Using YouTube API metadata as fallback: ${basicMetadata.title}`);
+          return {
+            fullContent: `${basicMetadata.title}\n\n${basicMetadata.description || 'No transcript available for this video.'}`,
+            metadata: {
+              ...basicMetadata,
+              wordCount: basicMetadata.title.split(/\s+/).length + (basicMetadata.description?.split(/\s+/).length || 0),
+              extractionMethod: 'api-metadata-fallback',
+              videoId,
+              note: 'No transcript available - using video metadata only'
+            }
+          };
+        }
+      }
+      
+      // Final fallback with basic video info
+      console.log(`📝 Using basic video info as final fallback for video ${videoId}`);
+      const basicContent = `YouTube Video\nVideo ID: ${videoId}\nURL: ${link}\n\nNo transcript or captions available for this video. The creator may not have enabled captions or subtitles.`;
+      
+      return {
+        fullContent: basicContent,
+        metadata: {
+          title: 'YouTube Video',
+          author: 'Unknown',
+          wordCount: basicContent.split(/\s+/).length,
+          extractionMethod: 'basic-fallback',
+          videoId,
+          note: 'No transcript available - using basic video information'
+        }
+      };
+    } catch (finalError) {
+      console.error('❌ All fallback strategies failed:', finalError);
+      throw new Error(
+        'No transcript available for this video. The creator may not have enabled captions or subtitles.'
+      );
+    }
   }
 
   /**
