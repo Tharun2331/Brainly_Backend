@@ -5,6 +5,37 @@ import axios from 'axios';
 
 export class ContentExtractorService {
   
+  // Rate limiting state
+  private static lastYouTubeRequest = 0;
+  private static readonly YOUTUBE_REQUEST_DELAY = parseInt(process.env.YOUTUBE_REQUEST_DELAY || '3000'); // 3 seconds between requests (configurable)
+  
+  /**
+   * Add delay between YouTube requests to avoid rate limiting
+   */
+  private static async delayYouTubeRequest(): Promise<void> {
+    const now = Date.now();
+    const timeSinceLastRequest = now - this.lastYouTubeRequest;
+    
+    if (timeSinceLastRequest < this.YOUTUBE_REQUEST_DELAY) {
+      const delayNeeded = this.YOUTUBE_REQUEST_DELAY - timeSinceLastRequest;
+      console.log(`⏳ Rate limiting: waiting ${delayNeeded}ms before YouTube request (delay: ${this.YOUTUBE_REQUEST_DELAY}ms)`);
+      await new Promise(resolve => setTimeout(resolve, delayNeeded));
+    }
+    
+    this.lastYouTubeRequest = Date.now();
+  }
+  
+  /**
+   * Check if error is due to rate limiting
+   */
+  private static isRateLimitError(error: any): boolean {
+    const errorMessage = error?.message?.toLowerCase() || '';
+    return errorMessage.includes('too many requests') || 
+           errorMessage.includes('captcha') ||
+           errorMessage.includes('rate limit') ||
+           errorMessage.includes('quota exceeded');
+  }
+  
   static async extractContent(
     type: string,
     link: string,
@@ -34,6 +65,11 @@ export class ContentExtractorService {
       }
     } catch (error) {
       console.error(`Content extraction failed for ${type}:`, error);
+      
+      // Check if this is a rate limiting error
+      if (this.isRateLimitError(error)) {
+        console.warn(`⚠️ Rate limiting detected for ${type}, using fallback strategies`);
+      }
       
       // For YouTube, try multiple fallback strategies
       if (type === 'youtube') {
@@ -163,6 +199,9 @@ export class ContentExtractorService {
     // Strategy 2: Try free youtube-transcript library (multiple languages)
     console.log('🔄 Trying free youtube-transcript library...');
     
+    // Add delay to avoid rate limiting
+    await this.delayYouTubeRequest();
+    
     // Try 'en' first as it's most common, then variants
     const languagesToTry = ['en'];
     
@@ -215,7 +254,12 @@ export class ContentExtractorService {
           }
         }
       } catch (langError: any) {
-        console.warn(`  ❌ Language ${lang} failed:`, langError.message);
+        if (this.isRateLimitError(langError)) {
+          console.warn(`  ⚠️ Rate limited for language ${lang}, skipping remaining attempts:`, langError.message);
+          break; // Don't try other languages if rate limited
+        } else {
+          console.warn(`  ❌ Language ${lang} failed:`, langError.message);
+        }
         continue;
       }
     }
@@ -223,6 +267,10 @@ export class ContentExtractorService {
     // Strategy 3: Try to get auto-generated captions (no language specified)
     try {
       console.log('🔄 Trying auto-generated captions...');
+      
+      // Add delay to avoid rate limiting
+      await this.delayYouTubeRequest();
+      
       const transcriptItems = await YoutubeTranscript.fetchTranscript(videoId);
       
       if (transcriptItems && transcriptItems.length > 0) {
@@ -249,8 +297,12 @@ export class ContentExtractorService {
           };
         }
       }
-    } catch (autoError) {
-      console.warn('Auto-generated captions failed:', autoError);
+    } catch (autoError: any) {
+      if (this.isRateLimitError(autoError)) {
+        console.warn('⚠️ Auto-generated captions failed due to rate limiting:', autoError.message);
+      } else {
+        console.warn('Auto-generated captions failed:', autoError);
+      }
     }
 
     // Strategy 4: Use video metadata as fallback (better than nothing)
