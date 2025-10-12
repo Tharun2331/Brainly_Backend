@@ -66,6 +66,7 @@ content: {
   type: string;
   link?: string;
   tags?: string[];
+  fullContent?: string;
 }
 )
 {
@@ -77,6 +78,7 @@ content: {
     Description: ${content.description}
     Type: ${content.type}
     Tags: ${content.tags?.join(', ') || 'none'}
+    Content: ${content.fullContent || content.description}
     `.trim();
 
     // Generate Embeddings
@@ -94,6 +96,7 @@ content: {
           type: content.type,
           link: content.link || '',
           tags: content.tags?.join(',') || '',
+          fullContent: content.fullContent || '',
           createdAt: new Date().toISOString(),
         },
       },

@@ -40,8 +40,11 @@ const contentSchema = new Schema({
   title:{type:String,required:true},
   tags: [{type: Schema.Types.ObjectId, ref:'Tags'}],
   userId: {type: Schema.Types.ObjectId, ref:'Users', required:true},
-  description: {type:String, required:true}
-
+  description: {type:String, required:true},
+  fullContent: {type:String, required:false},
+  processingStatus: {type:String, enum:['pending', 'processing', 'completed', 'failed'], default:'completed'},
+  processingError: {type:String, required:false},
+  contentMetadata: {type:Schema.Types.Mixed, required:false}
 })
 
 const linkSchema = new Schema({

@@ -1,4 +1,4 @@
-// src/controllers/BrainlyController.ts
+// src/controllers/ContentController.ts
 import { Request, Response, NextFunction } from "express";
 import { 
   sendErrorResponse, 
@@ -18,13 +18,25 @@ export async function createContent(
     const userId = req.userId!;
     const contentData = req.body;
 
-    const content = await ContentService.createContent(userId, contentData);
+    const content = await ContentService.createContent(userId, contentData) as any;
+
+    // Provide helpful message based on content type
+    let message = "Content created successfully!";
+    if (content.processingStatus === 'pending') {
+      message = "Content created! Processing in background...";
+    } else if (content.processingStatus === 'completed') {
+      message = "Content created and ready!";
+    }
 
     return sendSuccessResponse(
       res,
       201,
-      "Content created successfully!",
-      content
+      message,
+      {
+        content,
+        processingStatus: content.processingStatus,
+        queueStatus: ContentService.getQueueStatus()
+      }
     );
   } catch (error: any) {
     if (error.message === 'Link is required for non-note content types') {
@@ -156,6 +168,49 @@ export async function getContent(
 }
 
 /**
+ * Get single content by ID
+ */
+export async function getContentById(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = req.userId!;
+    const contentId = req.params.id;
+
+    const content = await ContentService.getContentById(contentId, userId);
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Content fetched successfully!",
+      content
+    );
+  } catch (error: any) {
+    if (error.message === 'Invalid content ID format') {
+      return sendErrorResponse(
+        res,
+        400,
+        error.message,
+        undefined,
+        "INVALID_ID"
+      );
+    }
+    if (error.message === 'Content not found') {
+      return sendErrorResponse(
+        res,
+        404,
+        error.message,
+        undefined,
+        "NOT_FOUND"
+      );
+    }
+    next(error);
+  }
+}
+
+/**
  * Get notes
  */
 export async function getNotes(
@@ -165,7 +220,7 @@ export async function getNotes(
 ) {
   try {
     const userId = req.userId!;
-    const notes = await ContentService.getContentByType(userId, 'note');
+    const notes = await ContentService.getUserContent(userId, 'note');
 
     return sendSuccessResponse(
       res,
@@ -188,7 +243,7 @@ export async function getArticles(
 ) {
   try {
     const userId = req.userId!;
-    const articles = await ContentService.getContentByType(userId, 'article');
+    const articles = await ContentService.getUserContent(userId, 'article');
 
     return sendSuccessResponse(
       res,
@@ -211,7 +266,7 @@ export async function getTweets(
 ) {
   try {
     const userId = req.userId!;
-    const tweets = await ContentService.getContentByType(userId, 'twitter');
+    const tweets = await ContentService.getUserContent(userId, 'twitter');
 
     return sendSuccessResponse(
       res,
@@ -234,7 +289,7 @@ export async function getVideos(
 ) {
   try {
     const userId = req.userId!;
-    const videos = await ContentService.getContentByType(userId, 'youtube');
+    const videos = await ContentService.getUserContent(userId, 'youtube');
 
     return sendSuccessResponse(
       res,
@@ -356,6 +411,348 @@ export async function reindexContent(
       result
     );
   } catch (error) {
+    next(error);
+  }
+}
+
+// =====================================================
+// NEW ENDPOINTS FOR APIFY INTEGRATION
+// =====================================================
+
+/**
+ * Reprocess failed or pending content
+ * Useful for retry functionality in the UI
+ */
+export async function reprocessContent(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = req.userId!;
+    const contentId = req.params.id;
+
+    const result = await ContentService.reprocessContent(contentId, userId);
+
+    return sendSuccessResponse(
+      res,
+      200,
+      result.message,
+      {
+        queueSize: result.queueSize
+      }
+    );
+  } catch (error: any) {
+    if (error.message === 'Content not found') {
+      return sendErrorResponse(
+        res,
+        404,
+        error.message,
+        undefined,
+        "NOT_FOUND"
+      );
+    }
+    if (error.message === 'Content is already being processed') {
+      return sendErrorResponse(
+        res,
+        409,
+        error.message,
+        undefined,
+        "ALREADY_PROCESSING"
+      );
+    }
+    if (error.message === 'Notes do not require reprocessing') {
+      return sendErrorResponse(
+        res,
+        400,
+        error.message,
+        undefined,
+        "INVALID_TYPE"
+      );
+    }
+    next(error);
+  }
+}
+
+/**
+ * Get processing queue status
+ * Useful for monitoring and debugging
+ */
+export async function getQueueStatus(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const status = ContentService.getQueueStatus();
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Queue status fetched successfully!",
+      status
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Get processing statistics for user's content
+ * Shows breakdown by processing status
+ */
+export async function getProcessingStats(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = req.userId!;
+
+    const stats = await ContentService.getProcessingStats(userId);
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Processing statistics fetched successfully!",
+      stats
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Batch reprocess multiple content items
+ * Useful for fixing multiple failed extractions at once
+ */
+export async function batchReprocessContent(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = req.userId!;
+    const { contentIds } = req.body;
+
+    if (!Array.isArray(contentIds) || contentIds.length === 0) {
+      return sendErrorResponse(
+        res,
+        400,
+        "Content IDs array is required",
+        { contentIds: "Please provide an array of content IDs" },
+        "VALIDATION_ERROR"
+      );
+    }
+
+    if (contentIds.length > 50) {
+      return sendErrorResponse(
+        res,
+        400,
+        "Too many content IDs",
+        { contentIds: "Maximum 50 content IDs allowed per batch" },
+        "VALIDATION_ERROR"
+      );
+    }
+
+    const results = {
+      queued: [] as string[],
+      failed: [] as { id: string; error: string }[]
+    };
+
+    // Process each content ID
+    for (const contentId of contentIds) {
+      try {
+        await ContentService.reprocessContent(contentId, userId);
+        results.queued.push(contentId);
+      } catch (error: any) {
+        results.failed.push({
+          id: contentId,
+          error: error.message || 'Unknown error'
+        });
+      }
+    }
+
+    return sendSuccessResponse(
+      res,
+      200,
+      `Queued ${results.queued.length} items for reprocessing`,
+      {
+        queued: results.queued.length,
+        failed: results.failed.length,
+        details: results,
+        queueStatus: ContentService.getQueueStatus()
+      }
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Get failed content items for user
+ * Useful for showing what needs to be reprocessed
+ */
+export async function getFailedContent(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = req.userId!;
+    const { limit = 20 } = req.query;
+
+    // You'll need to add this method to ContentService
+    const failedContent = await ContentService.getUserContent(userId) as any[];
+    
+    // Filter only failed items
+    const failed = failedContent
+      .filter(item => item.processingStatus === 'failed')
+      .slice(0, parseInt(limit as string, 10));
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Failed content fetched successfully!",
+      {
+        failed,
+        count: failed.length
+      }
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Get pending content items for user
+ * Useful for monitoring what's in queue
+ */
+export async function getPendingContent(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = req.userId!;
+    const { limit = 20 } = req.query;
+
+    const allContent = await ContentService.getUserContent(userId) as any[];
+    
+    // Filter only pending items
+    const pending = allContent
+      .filter(item => item.processingStatus === 'pending' || item.processingStatus === 'processing')
+      .slice(0, parseInt(limit as string, 10));
+
+    return sendSuccessResponse(
+      res,
+      200,
+      "Pending content fetched successfully!",
+      {
+        pending,
+        count: pending.length,
+        queueStatus: ContentService.getQueueStatus()
+      }
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Health check for content processing system
+ * Useful for monitoring and alerts
+ */
+export async function processingHealthCheck(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const queueStatus = ContentService.getQueueStatus();
+    
+    // Consider system unhealthy if queue is too large
+    const isHealthy = queueStatus.queueSize < 100;
+    const status = isHealthy ? 'healthy' : 'degraded';
+
+    return res.status(isHealthy ? 200 : 503).json({
+      success: true,
+      status,
+      queue: queueStatus,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Migrate content from description to fullContent field
+ * Fixes the issue where extraction failed but content was stored in description
+ */
+export async function migrateContentFromDescription(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = req.userId!;
+
+    const result = await ContentService.migrateContentFromDescription(userId);
+
+    return sendSuccessResponse(
+      res,
+      200,
+      `Migration completed: ${result.migrated} migrated, ${result.skipped} skipped, ${result.errors} errors`,
+      result
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * Reprocess tweet content specifically
+ * Enhanced reprocessing for tweets that failed extraction
+ */
+export async function reprocessTweetContent(
+  req: Request,
+  res: Response,
+  next: NextFunction
+) {
+  try {
+    const userId = req.userId!;
+    const contentId = req.params.id;
+
+    const result = await ContentService.reprocessTweetContent(contentId, userId);
+
+    return sendSuccessResponse(
+      res,
+      200,
+      result.message,
+      {
+        queueSize: result.queueSize
+      }
+    );
+  } catch (error: any) {
+    if (error.message === 'Tweet content not found') {
+      return sendErrorResponse(
+        res,
+        404,
+        error.message,
+        undefined,
+        "NOT_FOUND"
+      );
+    }
+    if (error.message === 'Tweet is already being processed') {
+      return sendErrorResponse(
+        res,
+        409,
+        error.message,
+        undefined,
+        "ALREADY_PROCESSING"
+      );
+    }
     next(error);
   }
 }

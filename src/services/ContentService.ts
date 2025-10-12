@@ -1,4 +1,4 @@
-// src/services/contentService.ts
+// src/services/ContentService.ts
 import { contentModel, tagModel } from '../db';
 import {
   addContentToVector,
@@ -6,6 +6,7 @@ import {
   deleteContentFromVector,
   searchContent,
 } from './PineconeService';
+import { ContentExtractorService } from './ContentExtractorService';
 import mongoose from 'mongoose';
 
 // Types
@@ -49,6 +50,81 @@ function isValidObjectId(id: string): boolean {
   return mongoose.Types.ObjectId.isValid(id);
 }
 
+// =====================================================
+// SIMPLE IN-MEMORY QUEUE
+// For production, replace with Redis/Bull
+// =====================================================
+class ProcessingQueue {
+  private queue: Array<{
+    contentId: string;
+    type: string;
+    link: string;
+    description: string;
+    userId: string;
+    retryCount?: number;
+  }> = [];
+  private processing = false;
+  private maxRetries = 3;
+
+  add(item: any) {
+    this.queue.push({ ...item, retryCount: 0 });
+    console.log(`📥 Added to queue: ${item.contentId} (Queue size: ${this.queue.length})`);
+    this.process();
+  }
+
+  private async process() {
+    if (this.processing || this.queue.length === 0) return;
+
+    this.processing = true;
+
+    while (this.queue.length > 0) {
+      const item = this.queue.shift();
+      if (!item) continue;
+
+      try {
+        console.log(`⚙️ Processing: ${item.contentId} (${item.type})`);
+        await ContentService.processContentItem(
+          item.contentId,
+          item.type,
+          item.link,
+          item.description,
+          item.userId
+        );
+      } catch (error) {
+        console.error(`❌ Failed to process ${item.contentId}:`, error);
+
+        // Retry logic
+        const retryCount = (item.retryCount || 0) + 1;
+        if (retryCount < this.maxRetries) {
+          console.log(`🔄 Retrying ${item.contentId} (Attempt ${retryCount + 1}/${this.maxRetries})`);
+          
+          // Add back to queue with delay
+          setTimeout(() => {
+            this.add({ ...item, retryCount });
+          }, 5000 * retryCount); // Exponential backoff: 5s, 10s, 15s
+        } else {
+          console.error(`💀 Max retries reached for ${item.contentId}`);
+        }
+      }
+    }
+
+    this.processing = false;
+  }
+
+  getQueueSize(): number {
+    return this.queue.length;
+  }
+
+  isProcessing(): boolean {
+    return this.processing;
+  }
+}
+
+const processingQueue = new ProcessingQueue();
+
+// =====================================================
+// CONTENT SERVICE
+// =====================================================
 export class ContentService {
   /**
    * Create new content
@@ -67,7 +143,7 @@ export class ContentService {
     // Create tag references
     const tagIds = await this.processTags(tags);
 
-    // Create content
+    // Create content with pending status
     const content = await contentModel.create({
       link,
       title: title || (type === 'note' ? 'Untitled Note' : ''),
@@ -75,9 +151,56 @@ export class ContentService {
       type,
       userId,
       tags: tagIds,
+      processingStatus: 'pending',
+      // For notes, set fullContent immediately
+      fullContent: type === 'note' ? description : undefined
     });
 
-    // Get populated content
+    console.log(`📝 Created content ${content._id} (${type})`);
+
+    // Handle notes immediately (no extraction needed)
+    if (type === 'note') {
+      await contentModel.findByIdAndUpdate(content._id, {
+        processingStatus: 'completed',
+        contentMetadata: {
+          wordCount: description.split(/\s+/).length,
+          extractedAt: new Date(),
+          extractionMethod: 'direct'
+        }
+      });
+
+      // Get populated content for vector indexing
+      const populatedContent = await contentModel
+        .findById(content._id)
+        .populate('tags', 'tag')
+        .lean();
+
+      if (populatedContent) {
+        this.indexContentAsync(
+          content._id.toString(),
+          userId,
+          {
+            title: populatedContent.title,
+            description: populatedContent.description,
+            type: populatedContent.type,
+            link: populatedContent.link ?? undefined,
+            tags: extractTagNames(populatedContent.tags as any[]),
+            fullContent: populatedContent.fullContent || ''
+          }
+        );
+      }
+    } else {
+      // Queue for background processing (YouTube, Article, Twitter)
+      processingQueue.add({
+        contentId: content._id.toString(),
+        type,
+        link: link || '',
+        description,
+        userId
+      });
+    }
+
+    // Return populated content immediately
     const populatedContent = await contentModel
       .findById(content._id)
       .populate('tags', 'tag')
@@ -88,16 +211,218 @@ export class ContentService {
       throw new Error('Failed to retrieve created content');
     }
 
-    // Add to vector database asynchronously (don't block)
-    this.indexContentAsync(content._id.toString(), userId, {
-      title: populatedContent.title || 'Untitled',
-      description: populatedContent.description,
-      type: populatedContent.type,
-      link: populatedContent.link ?? undefined,
-      tags: extractTagNames(populatedContent.tags as any[]),
-    }); 
-
     return populatedContent;
+  }
+
+  /**
+   * Process individual content item (called by queue)
+   * Extracts full content using Apify and updates MongoDB + Pinecone
+   */
+  static async processContentItem(
+    contentId: string,
+    type: string,
+    link: string,
+    description: string,
+    userId: string
+  ) {
+    try {
+      console.log(`🔄 Processing content ${contentId} (${type})`);
+
+      // Update status to processing
+      await contentModel.findByIdAndUpdate(contentId, {
+        processingStatus: 'processing'
+      });
+
+      // Extract content using Apify (or fallback methods)
+      const { fullContent, metadata } = await ContentExtractorService.extractContent(
+        type,
+        link,
+        description
+      );
+
+      console.log(`✅ Extracted ${metadata.wordCount} words from ${type}`);
+
+      // Update MongoDB with extracted content
+      await contentModel.findByIdAndUpdate(contentId, {
+        fullContent,
+        contentMetadata: {
+          ...metadata,
+          extractedAt: new Date()
+        },
+        processingStatus: 'completed'
+      });
+
+      // Get updated content with populated fields
+      const content = await contentModel
+        .findById(contentId)
+        .populate('tags', 'tag')
+        .lean();
+
+      if (!content) {
+        throw new Error('Content not found after update');
+      }
+
+      // Create enhanced searchable text for vector DB
+      // Include full content for better semantic search
+      const searchableText = this.buildSearchableText(
+        content.title,
+        content.description,
+        fullContent,
+        content.type,
+        extractTagNames(content.tags as any[])
+      );
+
+      // Update Pinecone with rich content
+      await updateContentInVector(
+        contentId,
+        userId,
+        {
+          title: content.title,
+          description: searchableText, // Use enhanced text
+          type: content.type,
+          link: content.link ?? undefined,
+          tags: extractTagNames(content.tags as any[])
+        }
+      );
+
+      console.log(`✅ Successfully processed and indexed content ${contentId}`);
+
+    } catch (error) {
+      console.error(`❌ Failed to process content ${contentId}:`, error);
+
+      // Update status to failed with error message
+      await contentModel.findByIdAndUpdate(contentId, {
+        processingStatus: 'failed',
+        processingError: error instanceof Error ? error.message : 'Unknown error'
+      });
+
+      throw error; // Re-throw for queue retry logic
+    }
+  }
+
+  /**
+   * Build enhanced searchable text for vector database
+   * Combines title, description, full content, and tags
+   */
+  private static buildSearchableText(
+    title: string,
+    description: string,
+    fullContent: string,
+    type: string,
+    tags: string[]
+  ): string {
+    // Truncate full content if too long (keep first 8000 chars)
+    const truncatedContent = fullContent.length > 8000
+      ? fullContent.substring(0, 8000) + '... [content truncated]'
+      : fullContent;
+
+    return `
+Title: ${title}
+Type: ${type}
+Description: ${description}
+Full Content: ${truncatedContent}
+Tags: ${tags.join(', ')}
+    `.trim();
+  }
+
+  /**
+   * Reprocess failed or pending content
+   * Useful for retry functionality in UI
+   */
+  static async reprocessContent(contentId: string, userId: string) {
+    const content = await contentModel.findOne({
+      _id: contentId,
+      userId
+    }) as any;
+
+    if (!content) {
+      throw new Error('Content not found');
+    }
+
+    if (content.processingStatus === 'processing') {
+      throw new Error('Content is already being processed');
+    }
+
+    if (content.type === 'note') {
+      throw new Error('Notes do not require reprocessing');
+    }
+
+    // Reset status and add back to queue
+    await contentModel.findByIdAndUpdate(contentId, {
+      processingStatus: 'pending',
+      processingError: undefined
+    });
+
+    processingQueue.add({
+      contentId: content._id.toString(),
+      type: content.type,
+      link: content.link || '',
+      description: content.description,
+      userId
+    });
+
+    return { 
+      message: 'Content queued for reprocessing',
+      queueSize: processingQueue.getQueueSize()
+    };
+  }
+
+  /**
+   * Reprocess tweets that failed extraction
+   * Specifically designed for tweet content that may have failed Apify extraction
+   */
+  static async reprocessTweetContent(contentId: string, userId: string) {
+    const content = await contentModel.findOne({
+      _id: contentId,
+      userId,
+      type: 'twitter'
+    }) as any;
+
+    if (!content) {
+      throw new Error('Tweet content not found');
+    }
+
+    if (content.processingStatus === 'processing') {
+      throw new Error('Tweet is already being processed');
+    }
+
+    // For tweets, we'll try a more aggressive reprocessing approach
+    console.log(`🔄 Reprocessing tweet ${contentId} with enhanced extraction`);
+
+    // Reset status and clear any previous errors
+    await contentModel.findByIdAndUpdate(contentId, {
+      processingStatus: 'pending',
+      processingError: undefined,
+      fullContent: undefined, // Clear previous content to force fresh extraction
+      contentMetadata: {
+        ...content.contentMetadata,
+        reprocessedAt: new Date(),
+        reprocessReason: 'Tweet extraction enhancement'
+      }
+    });
+
+    processingQueue.add({
+      contentId: content._id.toString(),
+      type: content.type,
+      link: content.link || '',
+      description: content.description,
+      userId
+    });
+
+    return { 
+      message: 'Tweet queued for enhanced reprocessing',
+      queueSize: processingQueue.getQueueSize()
+    };
+  }
+
+  /**
+   * Get queue status (for monitoring)
+   */
+  static getQueueStatus() {
+    return {
+      queueSize: processingQueue.getQueueSize(),
+      isProcessing: processingQueue.isProcessing()
+    };
   }
 
   /**
@@ -138,16 +463,27 @@ export class ContentService {
       .findById(content._id)
       .populate('tags', 'tag')
       .populate('userId', 'username')
-      .lean();
+      .lean() as any;
 
     if (!populatedContent) {
       throw new Error('Failed to retrieve updated content');
     }
 
+    // If content has fullContent, update vector with it
+    const searchableText = populatedContent.fullContent
+      ? this.buildSearchableText(
+          populatedContent.title,
+          populatedContent.description,
+          populatedContent.fullContent,
+          populatedContent.type,
+          extractTagNames(populatedContent.tags as any[])
+        )
+      : populatedContent.description;
+
     // Update vector database asynchronously
     this.updateVectorAsync(contentId, userId, {
       title: populatedContent.title || 'Untitled',
-      description: populatedContent.description,
+      description: searchableText,
       type: populatedContent.type,
       link: populatedContent.link ?? undefined,
       tags: extractTagNames(populatedContent.tags as any[]),
@@ -202,19 +538,24 @@ export class ContentService {
     return content;
   }
 
+
   /**
-   * Get content by type
+   * Get single content by ID (useful for chat feature)
    */
-  static async getContentByType(
-    userId: string,
-    type: 'twitter' | 'youtube' | 'article' | 'note'
-  ) {
+  static async getContentById(contentId: string, userId: string) {
+    if (!isValidObjectId(contentId)) {
+      throw new Error('Invalid content ID format');
+    }
+
     const content = await contentModel
-      .find({ userId, type })
+      .findOne({ _id: contentId, userId })
       .populate('tags', 'tag')
       .populate('userId', 'username')
-      .sort({ createdAt: -1 })
       .lean();
+
+    if (!content) {
+      throw new Error('Content not found');
+    }
 
     return content;
   }
@@ -389,6 +730,7 @@ export class ContentService {
       type: string;
       link?: string;
       tags: string[];
+      fullContent?: string;
     }
   ): void {
     addContentToVector(contentId, userId, data)
@@ -440,22 +782,34 @@ export class ContentService {
     const content = await contentModel
       .find({ userId })
       .populate('tags', 'tag')
-      .lean();
+      .lean() as any[];
 
     let indexed = 0;
     let failed = 0;
 
     for (const item of content) {
       try {
+        // Use fullContent if available, otherwise description
+        const searchableText = item.fullContent
+          ? this.buildSearchableText(
+              item.title || 'Untitled',
+              item.description,
+              item.fullContent,
+              item.type,
+              extractTagNames(item.tags as any[])
+            )
+          : item.description;
+
         await addContentToVector(
           item._id.toString(),
           userId,
           {
             title: item.title || 'Untitled',
-            description: item.description,
+            description: searchableText,
             type: item.type,
             link: item.link ?? undefined,
             tags: extractTagNames(item.tags as any[]),
+            fullContent: item.fullContent || '',
           }
         );
         indexed++;
@@ -466,5 +820,122 @@ export class ContentService {
     }
 
     return { indexed, failed };
+  }
+
+  /**
+   * Get processing statistics for monitoring
+   */
+  static async getProcessingStats(userId: string) {
+    const stats = await contentModel.aggregate([
+      { $match: { userId: new mongoose.Types.ObjectId(userId) } },
+      {
+        $group: {
+          _id: '$processingStatus',
+          count: { $sum: 1 }
+        }
+      }
+    ]);
+
+    const statsMap: Record<string, number> = {
+      pending: 0,
+      processing: 0,
+      completed: 0,
+      failed: 0
+    };
+
+    stats.forEach(stat => {
+      if (stat._id) {
+        statsMap[stat._id] = stat.count;
+      }
+    });
+
+    return {
+      ...statsMap,
+      total: Object.values(statsMap).reduce((a, b) => a + b, 0),
+      queueSize: processingQueue.getQueueSize(),
+      isProcessing: processingQueue.isProcessing()
+    };
+  }
+
+  /**
+   * Migrate content where fullContent is empty but description contains full content
+   * This fixes the issue where extraction failed but content was stored in description
+   */
+  static async migrateContentFromDescription(userId: string): Promise<{
+    migrated: number;
+    skipped: number;
+    errors: number;
+  }> {
+    console.log(`🔄 Starting content migration for user ${userId}`);
+    
+    const contents = await contentModel.find({
+      userId: new mongoose.Types.ObjectId(userId),
+      $or: [
+        { fullContent: { $exists: false } },
+        { fullContent: '' },
+        { fullContent: null }
+      ]
+    }).lean() as any[];
+
+    let migrated = 0;
+    let skipped = 0;
+    let errors = 0;
+
+    for (const content of contents) {
+      try {
+        // Check if description contains structured content with "Full Content:" section
+        const fullContentMatch = content.description?.match(/Full Content:\s*([\s\S]+?)(?:\n\n|$)/);
+        
+        if (fullContentMatch && fullContentMatch[1]) {
+          const extractedContent = fullContentMatch[1].trim();
+          
+          // Update the content with extracted fullContent
+          await contentModel.findByIdAndUpdate(content._id, {
+            fullContent: extractedContent,
+            contentMetadata: {
+              ...content.contentMetadata,
+              wordCount: extractedContent.split(/\s+/).length,
+              extractionMethod: 'migration-from-description',
+              migratedAt: new Date()
+            }
+          });
+
+          console.log(`✅ Migrated content ${content._id}: ${extractedContent.length} chars`);
+          migrated++;
+
+          // Also update the vector database with the new content
+          const searchableText = this.buildSearchableText(
+            content.title || 'Untitled',
+            content.description,
+            extractedContent,
+            content.type,
+            extractTagNames(content.tags as any[])
+          );
+
+          await updateContentInVector(
+            content._id.toString(),
+            userId,
+            {
+              title: content.title || 'Untitled',
+              description: searchableText,
+              type: content.type,
+              link: content.link ?? undefined,
+              tags: extractTagNames(content.tags as any[])
+            }
+          );
+
+        } else {
+          console.log(`⏭️ Skipped content ${content._id}: No "Full Content" section found`);
+          skipped++;
+        }
+      } catch (error) {
+        console.error(`❌ Failed to migrate content ${content._id}:`, error);
+        errors++;
+      }
+    }
+
+    console.log(`✅ Migration completed: ${migrated} migrated, ${skipped} skipped, ${errors} errors`);
+    
+    return { migrated, skipped, errors };
   }
 }
