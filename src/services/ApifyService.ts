@@ -3,9 +3,17 @@ import { ApifyClient } from 'apify-client';
 import dotenv from 'dotenv';
 dotenv.config();
 
-const client = new ApifyClient({
-  token: process.env.APIFY_API_TOKEN!
-});
+// Initialize Apify client only if token is available
+let client: ApifyClient | null = null;
+
+if (process.env.APIFY_API_TOKEN) {
+  client = new ApifyClient({
+    token: process.env.APIFY_API_TOKEN
+  });
+  console.log('✅ Apify client initialized with token');
+} else {
+  console.warn('⚠️ APIFY_API_TOKEN not found - Apify services will be disabled');
+}
 
 export class ApifyService {
   
@@ -16,6 +24,10 @@ export class ApifyService {
     fullContent: string;
     metadata: any;
   }> {
+    if (!client) {
+      throw new Error('Apify client not initialized - APIFY_API_TOKEN missing');
+    }
+
     try {
       console.log(`🎥 Starting YouTube extraction for: ${videoUrl}`);
 
@@ -94,6 +106,10 @@ export class ApifyService {
     fullContent: string;
     metadata: any;
   }> {
+    if (!client) {
+      throw new Error('Apify client not initialized - APIFY_API_TOKEN missing');
+    }
+
     try {
       console.log(`📰 Starting article extraction for: ${url}`);
 
@@ -148,6 +164,67 @@ export class ApifyService {
   }
 
   /**
+   * Extract article content using basic HTTP request (fallback when Apify fails)
+   */
+  static async extractArticleFallback(url: string): Promise<{
+    fullContent: string;
+    metadata: any;
+  }> {
+    try {
+      console.log(`🔄 Trying basic article extraction for: ${url}`);
+      
+      // Use axios to fetch the page content
+      const axios = require('axios');
+      const response = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        },
+        timeout: 10000
+      });
+
+      const html = response.data;
+      
+      // Basic HTML parsing to extract text content
+      let content = html
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '') // Remove scripts
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '') // Remove styles
+        .replace(/<[^>]+>/g, ' ') // Remove HTML tags
+        .replace(/\s+/g, ' ') // Normalize whitespace
+        .trim();
+
+      // Extract title from HTML
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      const title = titleMatch ? titleMatch[1].trim() : 'Article';
+
+      if (!content || content.length < 100) {
+        throw new Error('Article content too short or could not be extracted');
+      }
+
+      // Limit content length
+      const limitedContent = content.substring(0, 5000);
+
+      console.log(`✅ Basic article extraction successful: ${limitedContent.length} characters`);
+
+      return {
+        fullContent: limitedContent,
+        metadata: {
+          title: title,
+          author: 'Unknown',
+          publishDate: null,
+          wordCount: limitedContent.split(/\s+/).length,
+          extractionMethod: 'basic-http-fallback',
+          url: url,
+          note: 'Article extracted using basic HTTP request - limited content'
+        }
+      };
+
+    } catch (error: any) {
+      console.error('❌ Basic article extraction failed:', error.message);
+      throw new Error(`Basic article extraction failed: ${error.message}`);
+    }
+  }
+
+  /**
    * Extract Twitter content using alternative method (fallback)
    */
   static async extractTwitterContentFallback(tweetUrl: string): Promise<{
@@ -197,6 +274,10 @@ export class ApifyService {
    * Get YouTube metadata without requiring transcript
    */
   static async getYouTubeMetadata(videoUrl: string): Promise<any> {
+    if (!client) {
+      throw new Error('Apify client not initialized - APIFY_API_TOKEN missing');
+    }
+
     try {
       console.log(`📊 Getting YouTube metadata for: ${videoUrl}`);
 

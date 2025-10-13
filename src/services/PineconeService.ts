@@ -169,6 +169,7 @@ export async function updateContentInVector(
     type: string;
     link?: string;
     tags?: string[];
+    fullContent?: string;
   }
 ) {
   try {

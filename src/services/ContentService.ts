@@ -140,6 +140,14 @@ export class ContentService {
       throw new Error('Link is required for non-note content types');
     }
 
+    // Validate URL matches content type
+    if (type !== 'note' && link) {
+      const validatedType = this.validateUrlType(link);
+      if (validatedType !== type) {
+        throw new Error(`URL does not match content type. Expected ${type}, but URL appears to be ${validatedType}`);
+      }
+    }
+
     // Create tag references
     const tagIds = await this.processTags(tags);
 
@@ -259,7 +267,8 @@ export class ContentService {
         .lean();
 
       if (!content) {
-        throw new Error('Content not found after update');
+        console.error(`❌ Content ${contentId} not found after update - may have been deleted`);
+        throw new Error(`Content ${contentId} not found after update`);
       }
 
       // Create enhanced searchable text for vector DB
@@ -278,10 +287,11 @@ export class ContentService {
         userId,
         {
           title: content.title,
-          description: searchableText, // Use enhanced text
+          description: content.description, // Use original description, not enhanced text
           type: content.type,
           link: content.link ?? undefined,
-          tags: extractTagNames(content.tags as any[])
+          tags: extractTagNames(content.tags as any[]),
+          fullContent: fullContent // Include extracted full content
         }
       );
 
@@ -298,6 +308,26 @@ export class ContentService {
 
       throw error; // Re-throw for queue retry logic
     }
+  }
+
+  /**
+   * Validate URL and determine content type
+   */
+  private static validateUrlType(url: string): 'youtube' | 'twitter' | 'article' {
+    const lowerUrl = url.toLowerCase();
+    
+    // Check for YouTube URLs
+    if (lowerUrl.includes('youtube.com') || lowerUrl.includes('youtu.be')) {
+      return 'youtube';
+    }
+    
+    // Check for Twitter/X URLs
+    if (lowerUrl.includes('twitter.com') || lowerUrl.includes('x.com')) {
+      return 'twitter';
+    }
+    
+    // Everything else is considered an article
+    return 'article';
   }
 
   /**
@@ -320,7 +350,7 @@ export class ContentService {
 Title: ${title}
 Type: ${type}
 Description: ${description}
-Full Content: ${truncatedContent}
+Content: ${truncatedContent}
 Tags: ${tags.join(', ')}
     `.trim();
   }
@@ -752,6 +782,7 @@ Tags: ${tags.join(', ')}
       type: string;
       link?: string;
       tags: string[];
+      fullContent?: string;
     }
   ): void {
     updateContentInVector(contentId, userId, data)
@@ -883,51 +914,9 @@ Tags: ${tags.join(', ')}
 
     for (const content of contents) {
       try {
-        // Check if description contains structured content with "Full Content:" section
-        const fullContentMatch = content.description?.match(/Full Content:\s*([\s\S]+?)(?:\n\n|$)/);
-        
-        if (fullContentMatch && fullContentMatch[1]) {
-          const extractedContent = fullContentMatch[1].trim();
-          
-          // Update the content with extracted fullContent
-          await contentModel.findByIdAndUpdate(content._id, {
-            fullContent: extractedContent,
-            contentMetadata: {
-              ...content.contentMetadata,
-              wordCount: extractedContent.split(/\s+/).length,
-              extractionMethod: 'migration-from-description',
-              migratedAt: new Date()
-            }
-          });
-
-          console.log(`✅ Migrated content ${content._id}: ${extractedContent.length} chars`);
-          migrated++;
-
-          // Also update the vector database with the new content
-          const searchableText = this.buildSearchableText(
-            content.title || 'Untitled',
-            content.description,
-            extractedContent,
-            content.type,
-            extractTagNames(content.tags as any[])
-          );
-
-          await updateContentInVector(
-            content._id.toString(),
-            userId,
-            {
-              title: content.title || 'Untitled',
-              description: searchableText,
-              type: content.type,
-              link: content.link ?? undefined,
-              tags: extractTagNames(content.tags as any[])
-            }
-          );
-
-        } else {
-          console.log(`⏭️ Skipped content ${content._id}: No "Full Content" section found`);
-          skipped++;
-        }
+        // Skip migration - we no longer store fullContent in description
+        console.log(`⏭️ Skipped content ${content._id}: Migration no longer needed`);
+        skipped++;
       } catch (error) {
         console.error(`❌ Failed to migrate content ${content._id}:`, error);
         errors++;

@@ -1,5 +1,4 @@
 // src/services/ContentExtractorService.ts - FIXED TYPE ERRORS
-import { ApifyService } from './ApifyService';
 import { YoutubeTranscript } from 'youtube-transcript';
 import axios from 'axios';
 
@@ -75,31 +74,7 @@ export class ContentExtractorService {
       if (type === 'youtube') {
         const videoId = this.extractYouTubeVideoId(link);
         
-        // Strategy 1: Try Apify metadata fallback
-        if (process.env.APIFY_API_TOKEN) {
-          try {
-            console.log('🔄 Trying Apify metadata fallback...');
-            const apifyMetadata = await ApifyService.getYouTubeMetadata(link);
-            const metadataContent = `${apifyMetadata.title || 'YouTube Video'}\n\n${apifyMetadata.text || ''}`.trim();
-            
-            return {
-              fullContent: metadataContent || description || 'No content available',
-              metadata: {
-                title: apifyMetadata.title || 'YouTube Video',
-                author: apifyMetadata.channelName || 'Unknown',
-                wordCount: metadataContent.split(/\s+/).length,
-                extractionMethod: 'fallback-metadata',
-                videoId,
-                duration: apifyMetadata.duration || 0,
-                error: error instanceof Error ? error.message : 'Unknown error'
-              }
-            };
-          } catch (metaError) {
-            console.warn('Apify metadata fallback failed:', metaError);
-          }
-        }
-        
-        // Strategy 2: Try YouTube API metadata fallback
+        // Strategy 1: Try YouTube API metadata fallback
         if (process.env.YOUTUBE_API_KEY && videoId) {
           try {
             console.log('🔄 Trying YouTube API metadata fallback...');
@@ -122,7 +97,7 @@ export class ContentExtractorService {
           }
         }
         
-        // Strategy 3: Basic video info fallback
+        // Strategy 2: Basic video info fallback
         if (videoId) {
           console.log('🔄 Using basic video info fallback...');
           const basicContent = `YouTube Video\nVideo ID: ${videoId}\nURL: ${link}\n\nNo transcript or captions available for this video. The creator may not have enabled captions or subtitles.`;
@@ -141,15 +116,7 @@ export class ContentExtractorService {
       }
       
       // Final fallback to user description
-      // Extract full content from description if it contains "Full Content:" section
       let fallbackContent = description || 'No content available';
-      
-      // Check if description contains structured content with "Full Content:" section
-      const fullContentMatch = description?.match(/Full Content:\s*([\s\S]+?)(?:\n\n|$)/);
-      if (fullContentMatch && fullContentMatch[1]) {
-        fallbackContent = fullContentMatch[1].trim();
-        console.log(`📝 Extracted ${fallbackContent.length} chars from description's "Full Content" section`);
-      }
       
       return {
         fullContent: fallbackContent,
@@ -176,23 +143,13 @@ export class ContentExtractorService {
       throw new Error('Invalid YouTube URL - could not extract video ID');
     }
 
-    let apifyMetadata: any = null; // Store Apify metadata for fallback
-
-    // Strategy 1: Try Apify (if available and configured)
-    if (process.env.APIFY_API_TOKEN) {
+    // Strategy 1: Try YouTube API metadata (if available)
+    let apiMetadata: any = null;
+    if (process.env.YOUTUBE_API_KEY) {
       try {
-        console.log('📡 Attempting Apify YouTube extraction...');
-        const result = await ApifyService.extractYouTubeTranscript(link);
-        console.log(`✅ Apify extraction successful: ${result.metadata.wordCount} words`);
-        return result;
-      } catch (apifyError: any) {
-        console.warn('⚠️ Apify YouTube extraction failed:', apifyError.message);
-        // Try to get metadata from Apify even if transcript failed
-        try {
-          apifyMetadata = await ApifyService.getYouTubeMetadata(link);
-        } catch (metaError) {
-          console.warn('Could not get Apify metadata');
-        }
+        apiMetadata = await this.getYouTubeMetadataFromAPI(videoId);
+      } catch (apiError) {
+        console.warn('Could not get YouTube API metadata');
       }
     }
 
@@ -202,8 +159,8 @@ export class ContentExtractorService {
     // Add delay to avoid rate limiting
     await this.delayYouTubeRequest();
     
-    // Try 'en' first as it's most common, then variants
-    const languagesToTry = ['en'];
+    // Try multiple languages in order of preference
+    const languagesToTry = ['en', 'en-US', 'en-GB'];
     
     for (const lang of languagesToTry) {
       try {
@@ -305,21 +262,75 @@ export class ContentExtractorService {
       }
     }
 
-    // Strategy 4: Use video metadata as fallback (better than nothing)
-    if (apifyMetadata) {
+    // Strategy 4: Try to get content from video page HTML
+    try {
+      console.log('🔄 Trying to extract content from video page HTML...');
+      const pageContent = await this.extractFromVideoPage(link);
+      if (pageContent && pageContent.length > 100) {
+        console.log(`✅ Video page extraction successful: ${pageContent.length} chars`);
+        return {
+          fullContent: pageContent,
+          metadata: {
+            title: 'YouTube Video',
+            author: 'Unknown',
+            wordCount: pageContent.split(/\s+/).length,
+            extractionMethod: 'video-page-html',
+            videoId,
+            note: 'Content extracted from video page HTML'
+          }
+        };
+      }
+    } catch (pageError) {
+      console.warn('Video page extraction failed:', pageError);
+    }
+
+    // Strategy 5: Use video metadata as fallback (better than nothing)
+    if (apiMetadata) {
       console.warn('⚠️ No transcript found, using video metadata as content');
-      const metadataContent = `${apifyMetadata.title || 'YouTube Video'}\n\n${apifyMetadata.text || ''}`.trim();
+      
+      // Create more comprehensive content from metadata
+      let metadataContent = '';
+      
+      if (apiMetadata.title) {
+        metadataContent += `Title: ${apiMetadata.title}\n\n`;
+      }
+      
+      if (apiMetadata.description) {
+        // Use first 1000 characters of description
+        const description = apiMetadata.description.length > 1000 
+          ? apiMetadata.description.substring(0, 1000) + '...'
+          : apiMetadata.description;
+        metadataContent += `Description: ${description}\n\n`;
+      }
+      
+      if (apiMetadata.author) {
+        metadataContent += `Channel: ${apiMetadata.author}\n`;
+      }
+      
+      if (apiMetadata.duration) {
+        const minutes = Math.floor(apiMetadata.duration / 60);
+        const seconds = apiMetadata.duration % 60;
+        metadataContent += `Duration: ${minutes}:${seconds.toString().padStart(2, '0')}\n`;
+      }
+      
+      if (apiMetadata.viewCount) {
+        metadataContent += `Views: ${apiMetadata.viewCount.toLocaleString()}\n`;
+      }
+      
+      metadataContent += `\nVideo URL: ${link}\n`;
+      metadataContent += `\nNote: This video does not have captions or transcripts available. The content above is from the video's metadata and description.`;
       
       return {
-        fullContent: metadataContent || 'No content available',
+        fullContent: metadataContent.trim(),
         metadata: {
-          title: apifyMetadata.title || 'YouTube Video',
-          author: apifyMetadata.channelName || 'Unknown',
+          title: apiMetadata.title || 'YouTube Video',
+          author: apiMetadata.author || 'Unknown',
           wordCount: metadataContent.split(/\s+/).length,
           extractionMethod: 'metadata-only',
           videoId,
-          duration: apifyMetadata.duration || 0,
-          note: 'No transcript available - content is from video metadata only'
+          duration: apiMetadata.duration || 0,
+          viewCount: apiMetadata.viewCount || 0,
+          note: 'No transcript available - content is from video metadata and description'
         }
       };
     }
@@ -348,7 +359,7 @@ export class ContentExtractorService {
       
       // Final fallback with basic video info
       console.log(`📝 Using basic video info as final fallback for video ${videoId}`);
-      const basicContent = `YouTube Video\nVideo ID: ${videoId}\nURL: ${link}\n\nNo transcript or captions available for this video. The creator may not have enabled captions or subtitles.`;
+      const basicContent = `YouTube Video\nVideo ID: ${videoId}\nURL: ${link}\n\nThis video could not be processed for the following reasons:\n- No captions or transcripts are available\n- The video may be private or restricted\n- The creator may not have enabled captions\n- The video may be too new or still processing\n\nTo get the content from this video, please:\n1. Watch the video directly on YouTube\n2. Check if captions are available in the video player\n3. Try adding the video again later if it's still processing`;
       
       return {
         fullContent: basicContent,
@@ -358,7 +369,7 @@ export class ContentExtractorService {
           wordCount: basicContent.split(/\s+/).length,
           extractionMethod: 'basic-fallback',
           videoId,
-          note: 'No transcript available - using basic video information'
+          note: 'No transcript available - using basic video information with troubleshooting tips'
         }
       };
     } catch (finalError) {
@@ -422,7 +433,7 @@ export class ContentExtractorService {
   }
 
   /**
-   * Extract article content
+   * Extract article content using free HTTP requests
    */
   private static async extractArticleContent(link: string): Promise<{
     fullContent: string;
@@ -430,7 +441,7 @@ export class ContentExtractorService {
   }> {
     try {
       console.log(`📰 Extracting article from: ${link}`);
-      const result = await ApifyService.extractArticle(link);
+      const result = await this.extractArticleFallback(link);
       console.log(`✅ Article extraction successful: ${result.metadata.wordCount} words`);
       return result;
     } catch (error) {
@@ -440,19 +451,106 @@ export class ContentExtractorService {
   }
 
   /**
-   * Extract Twitter content
+   * Extract article content using basic HTTP request (free method)
+   */
+  private static async extractArticleFallback(url: string): Promise<{
+    fullContent: string;
+    metadata: any;
+  }> {
+    try {
+      console.log(`🔄 Trying basic article extraction for: ${url}`);
+      
+      // Use axios to fetch the page content
+      const response = await axios.get(url, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        },
+        timeout: 10000
+      });
+
+      const html = response.data;
+      
+      // Basic HTML parsing to extract text content
+      let content = html
+        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '') // Remove scripts
+        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '') // Remove styles
+        .replace(/<[^>]+>/g, ' ') // Remove HTML tags
+        .replace(/\s+/g, ' ') // Normalize whitespace
+        .trim();
+
+      // Extract title from HTML
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      const title = titleMatch ? titleMatch[1].trim() : 'Article';
+
+      if (!content || content.length < 100) {
+        throw new Error('Article content too short or could not be extracted');
+      }
+
+      // Limit content length
+      const limitedContent = content.substring(0, 5000);
+
+      console.log(`✅ Basic article extraction successful: ${limitedContent.length} characters`);
+
+      return {
+        fullContent: limitedContent,
+        metadata: {
+          title: title,
+          author: 'Unknown',
+          publishDate: null,
+          wordCount: limitedContent.split(/\s+/).length,
+          extractionMethod: 'basic-http-fallback',
+          url: url,
+          note: 'Article extracted using basic HTTP request - limited content'
+        }
+      };
+
+    } catch (error: any) {
+      console.error('❌ Basic article extraction failed:', error.message);
+      throw new Error(`Basic article extraction failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Extract Twitter content using URL parsing (free method)
    */
   private static async extractTwitterContent(link: string, description: string): Promise<{
     fullContent: string;
     metadata: any;
   }> {
     try {
-      console.log(`🐦 Extracting tweet using fallback method: ${link}`);
-      const result = await ApifyService.extractTwitterContentFallback(link);
-      console.log(`✅ Fallback tweet extraction successful`);
-      return result;
+      console.log(`🐦 Extracting tweet using URL parsing: ${link}`);
+      
+      // Extract tweet ID from URL
+      const tweetIdMatch = link.match(/status\/(\d+)/);
+      if (!tweetIdMatch) {
+        throw new Error('Invalid Twitter URL format');
+      }
+      
+      const tweetId = tweetIdMatch[1];
+      
+      // Try to extract basic info from URL structure
+      const urlParts = link.split('/');
+      const username = urlParts[3]; // Extract username from URL
+      
+      // Create a basic tweet representation
+      const fallbackContent = `Tweet from @${username}\nTweet ID: ${tweetId}\nURL: ${link}\n\nNote: This tweet could not be fully extracted due to Twitter API restrictions. The original tweet may contain more detailed information.`;
+      
+      return {
+        fullContent: fallbackContent,
+        metadata: {
+          author: username,
+          authorHandle: username,
+          tweetId: tweetId,
+          publishDate: null,
+          likes: 0,
+          retweets: 0,
+          wordCount: fallbackContent.split(/\s+/).length,
+          extractionMethod: 'url-parsing',
+          note: 'Tweet content extracted using URL parsing due to API limitations'
+        }
+      };
     } catch (fallbackError) {
-      console.warn('⚠️ Fallback extraction failed, using enhanced description:', fallbackError);
+      console.warn('⚠️ URL parsing failed, using enhanced description:', fallbackError);
 
       // Enhanced fallback: try to extract more meaningful content from description
       let enhancedContent = description || 'No content available';
@@ -474,6 +572,67 @@ export class ContentExtractorService {
           note: 'Fallback tweet extraction failed - using enhanced description content'
         }
       };
+    }
+  }
+
+  /**
+   * Extract content from YouTube video page HTML
+   */
+  private static async extractFromVideoPage(videoUrl: string): Promise<string> {
+    try {
+      const response = await axios.get(videoUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+        },
+        timeout: 10000
+      });
+
+      const html = response.data;
+      
+      // Extract title
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      const title = titleMatch ? titleMatch[1].replace(' - YouTube', '').trim() : 'YouTube Video';
+      
+      // Extract description from meta tag
+      const descMatch = html.match(/<meta name="description" content="([^"]+)"/i);
+      const description = descMatch ? descMatch[1] : '';
+      
+      // Extract channel name
+      const channelMatch = html.match(/"ownerChannelName":"([^"]+)"/i);
+      const channel = channelMatch ? channelMatch[1] : 'Unknown';
+      
+      // Try to extract more content from JSON-LD or other structured data
+      const jsonLdMatch = html.match(/<script type="application\/ld\+json">([^<]+)<\/script>/i);
+      let additionalContent = '';
+      
+      if (jsonLdMatch) {
+        try {
+          const jsonData = JSON.parse(jsonLdMatch[1]);
+          if (jsonData.description) {
+            additionalContent = jsonData.description;
+          }
+        } catch (e) {
+          // Ignore JSON parsing errors
+        }
+      }
+      
+      // Combine all extracted content
+      let content = `Title: ${title}\n`;
+      if (channel !== 'Unknown') {
+        content += `Channel: ${channel}\n`;
+      }
+      if (description) {
+        content += `\nDescription: ${description}\n`;
+      }
+      if (additionalContent && additionalContent !== description) {
+        content += `\nAdditional Info: ${additionalContent}\n`;
+      }
+      
+      content += `\nVideo URL: ${videoUrl}`;
+      
+      return content;
+    } catch (error) {
+      throw new Error(`Failed to extract from video page: ${error}`);
     }
   }
 
