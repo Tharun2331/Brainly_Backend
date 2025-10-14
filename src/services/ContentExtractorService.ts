@@ -1,4 +1,5 @@
 // src/services/ContentExtractorService.ts - FIXED TYPE ERRORS
+import { ApifyService } from './ApifyService';
 import { YoutubeTranscript } from 'youtube-transcript';
 import axios from 'axios';
 
@@ -143,7 +144,19 @@ export class ContentExtractorService {
       throw new Error('Invalid YouTube URL - could not extract video ID');
     }
 
-    // Strategy 1: Try YouTube API metadata (if available)
+    // Strategy 1: Try Apify YouTube extraction (if available)
+    if (process.env.APIFY_API_TOKEN) {
+      try {
+        console.log('📡 Attempting Apify YouTube extraction...');
+        const result = await ApifyService.extractYouTubeTranscript(link);
+        console.log(`✅ Apify extraction successful: ${result.metadata.wordCount} words`);
+        return result;
+      } catch (apifyError: any) {
+        console.warn('⚠️ Apify YouTube extraction failed:', apifyError.message);
+      }
+    }
+
+    // Strategy 2: Try YouTube API metadata (if available)
     let apiMetadata: any = null;
     if (process.env.YOUTUBE_API_KEY) {
       try {
@@ -153,7 +166,7 @@ export class ContentExtractorService {
       }
     }
 
-    // Strategy 2: Try free youtube-transcript library (multiple languages)
+    // Strategy 3: Try free youtube-transcript library (multiple languages)
     console.log('🔄 Trying free youtube-transcript library...');
     
     // Add delay to avoid rate limiting
@@ -221,7 +234,7 @@ export class ContentExtractorService {
       }
     }
 
-    // Strategy 3: Try to get auto-generated captions (no language specified)
+    // Strategy 4: Try to get auto-generated captions (no language specified)
     try {
       console.log('🔄 Trying auto-generated captions...');
       
@@ -262,7 +275,7 @@ export class ContentExtractorService {
       }
     }
 
-    // Strategy 4: Try to get content from video page HTML
+    // Strategy 5: Try to get content from video page HTML
     try {
       console.log('🔄 Trying to extract content from video page HTML...');
       const pageContent = await this.extractFromVideoPage(link);
@@ -284,7 +297,7 @@ export class ContentExtractorService {
       console.warn('Video page extraction failed:', pageError);
     }
 
-    // Strategy 5: Use video metadata as fallback (better than nothing)
+    // Strategy 6: Use video metadata as fallback (better than nothing)
     if (apiMetadata) {
       console.warn('⚠️ No transcript found, using video metadata as content');
       
@@ -433,7 +446,7 @@ export class ContentExtractorService {
   }
 
   /**
-   * Extract article content using free HTTP requests
+   * Extract article content using Apify or fallback
    */
   private static async extractArticleContent(link: string): Promise<{
     fullContent: string;
@@ -441,8 +454,21 @@ export class ContentExtractorService {
   }> {
     try {
       console.log(`📰 Extracting article from: ${link}`);
+      
+      // Try Apify first if available
+      if (process.env.APIFY_API_TOKEN) {
+        try {
+          const result = await ApifyService.extractArticle(link);
+          console.log(`✅ Apify article extraction successful: ${result.metadata.wordCount} words`);
+          return result;
+        } catch (apifyError) {
+          console.warn('⚠️ Apify article extraction failed, trying fallback:', apifyError);
+        }
+      }
+      
+      // Fallback to basic HTTP extraction
       const result = await this.extractArticleFallback(link);
-      console.log(`✅ Article extraction successful: ${result.metadata.wordCount} words`);
+      console.log(`✅ Article fallback extraction successful: ${result.metadata.wordCount} words`);
       return result;
     } catch (error) {
       console.error('❌ Article extraction failed:', error);
