@@ -246,7 +246,74 @@ export class ContentExtractorService {
   }
 
   /**
-   * Extract article content using basic HTTP requests
+   * Extract article content using Apify
+   */
+  private static async extractArticleWithApify(url: string): Promise<{
+    fullContent: string;
+    metadata: any;
+  }> {
+    const { ApifyClient } = require('apify-client');
+    
+    const client = new ApifyClient({
+      token: process.env.APIFY_API_TOKEN
+    });
+
+    try {
+      // Use Website Content Crawler for better article extraction
+      const run = await client.actor('apify/website-content-crawler').call({
+        startUrls: [{ url }],
+        maxCrawlPages: 1,
+        crawlerType: 'playwright:firefox',
+        includeHtml: false,
+        includeScreenshots: false
+      });
+
+      const { items } = await client.dataset(run.defaultDatasetId).listItems();
+
+      if (!items || items.length === 0) {
+        throw new Error('No content extracted from article');
+      }
+
+      const article = items[0] as any;
+      let content: string = article.text || article.markdown || article.html || '';
+      
+      if (typeof content !== 'string') {
+        content = JSON.stringify(content);
+      }
+
+      if (!content || content.length < 100) {
+        throw new Error('Article content too short or empty');
+      }
+
+      // Clean and limit content
+      const cleanContent = content
+        .replace(/\s{2,}/g, ' ')
+        .trim()
+        .substring(0, 10000); // Limit to 10k chars
+
+      console.log(`✅ Apify article extraction successful: ${cleanContent.length} characters`);
+
+      return {
+        fullContent: cleanContent,
+        metadata: {
+          title: article.title || 'Untitled Article',
+          author: article.author || 'Unknown',
+          publishDate: article.publishDate || null,
+          wordCount: cleanContent.split(/\s+/).length,
+          extractionMethod: 'apify-website-crawler',
+          url: article.url || url,
+          note: 'Article extracted using Apify website content crawler'
+        }
+      };
+
+    } catch (error: any) {
+      console.error('❌ Apify article extraction failed:', error.message);
+      throw new Error(`Apify article extraction failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Extract article content using Apify and fallback strategies
    */
   private static async extractArticleContent(link: string): Promise<{
     fullContent: string;
@@ -255,50 +322,164 @@ export class ContentExtractorService {
     try {
       console.log(`📰 Extracting article from: ${link}`);
       
-      const response = await axios.get(link, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        },
-        timeout: 10000
-      });
-
-      const html = response.data;
+      // Strategy 1: Try Apify article extraction (if available)
+      if (process.env.APIFY_API_TOKEN) {
+        try {
+          console.log('📡 Attempting Apify article extraction...');
+          const result = await this.extractArticleWithApify(link);
+          console.log(`✅ Apify article extraction successful: ${result.metadata.wordCount} words`);
+          return result;
+        } catch (apifyError: any) {
+          console.warn('⚠️ Apify article extraction failed:', apifyError.message);
+        }
+      }
       
-      // Basic HTML parsing to extract text content
-      let content = html
-        .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-        .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
+      // Strategy 2: Try with enhanced headers (fallback)
+      try {
+        const response = await axios.get(link, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
+          },
+          timeout: 15000,
+          maxRedirects: 5
+        });
 
-      // Extract title from HTML
-      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-      const title = titleMatch ? titleMatch[1].trim() : 'Article';
+        const html = response.data;
+        
+        // Basic HTML parsing to extract text content
+        let content = html
+          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
 
-      if (!content || content.length < 100) {
-        throw new Error('Article content too short or could not be extracted');
+        // Extract title from HTML
+        const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+        const title = titleMatch ? titleMatch[1].trim() : 'Article';
+
+        if (content && content.length >= 100) {
+          // Limit content length
+          const limitedContent = content.substring(0, 5000);
+
+          return {
+            fullContent: limitedContent,
+            metadata: {
+              title: title,
+              author: 'Unknown',
+              publishDate: null,
+              wordCount: limitedContent.split(/\s+/).length,
+              extractionMethod: 'enhanced-http-extraction',
+              url: link,
+              note: 'Article extracted using enhanced HTTP request'
+            }
+          };
+        }
+      } catch (httpError: any) {
+        console.warn('⚠️ Enhanced HTTP extraction failed:', httpError.message);
       }
 
-      // Limit content length
-      const limitedContent = content.substring(0, 5000);
+      // Strategy 3: Try with minimal headers (for sites that block complex requests)
+      try {
+        console.log('🔄 Trying minimal headers approach...');
+        const response = await axios.get(link, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (compatible; ArticleBot/1.0)'
+          },
+          timeout: 10000
+        });
+
+        const html = response.data;
+        let content = html
+          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+        const title = titleMatch ? titleMatch[1].trim() : 'Article';
+
+        if (content && content.length >= 100) {
+          const limitedContent = content.substring(0, 5000);
+          return {
+            fullContent: limitedContent,
+            metadata: {
+              title: title,
+              author: 'Unknown',
+              publishDate: null,
+              wordCount: limitedContent.split(/\s+/).length,
+              extractionMethod: 'minimal-http-extraction',
+              url: link,
+              note: 'Article extracted using minimal HTTP request'
+            }
+          };
+        }
+      } catch (minimalError: any) {
+        console.warn('⚠️ Minimal HTTP extraction failed:', minimalError.message);
+      }
+
+      // Strategy 4: Create fallback content from URL and basic info
+      console.log('🔄 Creating fallback content from URL...');
+      const urlParts = new URL(link);
+      const domain = urlParts.hostname;
+      const pathParts = urlParts.pathname.split('/').filter(Boolean);
+      
+      let fallbackContent = `Article from ${domain}\n`;
+      fallbackContent += `URL: ${link}\n\n`;
+      
+      // Try to extract meaningful info from URL
+      if (pathParts.length > 0) {
+        const lastPart = pathParts[pathParts.length - 1];
+        if (lastPart && lastPart.length > 10) {
+          fallbackContent += `Article ID/Title: ${lastPart}\n\n`;
+        }
+      }
+    
 
       return {
-        fullContent: limitedContent,
+        fullContent: fallbackContent,
         metadata: {
-          title: title,
+          title: `Article from ${domain}`,
           author: 'Unknown',
           publishDate: null,
-          wordCount: limitedContent.split(/\s+/).length,
-          extractionMethod: 'basic-http-fallback',
+          wordCount: fallbackContent.split(/\s+/).length,
+          extractionMethod: 'url-fallback',
           url: link,
-          note: 'Article extracted using basic HTTP request - limited content'
+          domain: domain,
+          note: 'Article content could not be extracted due to access restrictions - using URL-based fallback'
         }
       };
 
     } catch (error: any) {
-      console.error('❌ Article extraction failed:', error.message);
-      throw new Error(`Article extraction failed: ${error.message}`);
+      console.error('❌ All article extraction strategies failed:', error.message);
+      
+      // Final fallback
+      const finalContent = `Article could not be extracted from: ${link}\n\nThis may be due to:\n- Access restrictions on the website\n- Anti-bot protection\n- Network connectivity issues\n\nPlease visit the link directly to read the content.`;
+      
+      return {
+        fullContent: finalContent,
+        metadata: {
+          title: 'Article (Extraction Failed)',
+          author: 'Unknown',
+          publishDate: null,
+          wordCount: finalContent.split(/\s+/).length,
+          extractionMethod: 'final-fallback',
+          url: link,
+          error: error.message,
+          note: 'All article extraction strategies failed - using final fallback'
+        }
+      };
     }
   }
 
